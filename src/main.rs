@@ -2,6 +2,7 @@
 mod devices;
 mod error;
 mod highlight;
+mod mapper;
 mod processor;
 
 fn main() {
