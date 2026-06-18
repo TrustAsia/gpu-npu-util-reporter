@@ -1,4 +1,5 @@
 /// 程序入口（后续任务填充）。
+mod devices;
 mod error;
 
 fn main() {
