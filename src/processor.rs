@@ -91,6 +91,53 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
     })
 }
 
+/// HBM fallback：当直接利用率指标为空时，用 used/total*100 重算显存占用率序列。
+///
+/// `used`/`total` 为显存字节/MB 的原始序列。返回 fallback 后的 [`Series`]：
+/// 点数与 used 对齐（按 timestamp 与 total 对齐），total 为 0 的点丢弃。
+/// 调用方应：先尝试 `aggregate(direct.points)`；为空时再调用本函数并聚合结果。
+pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
+    // 按 timestamp 对齐 used 与 total
+    let total_map: std::collections::HashMap<i64, f64> = total
+        .points
+        .iter()
+        .map(|(ts, v)| (ts.timestamp(), *v))
+        .collect();
+    let mut points = Vec::new();
+    for (ts, u) in &used.points {
+        if let Some(tot) = total_map.get(&ts.timestamp()) {
+            if *tot > 0.0 {
+                points.push((*ts, u / tot * 100.0));
+            }
+        }
+    }
+    Series {
+        labels: used.labels.clone(),
+        points,
+    }
+}
+
+/// 归属取值模式（PRD §2.4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnershipMode {
+    /// 瞬时值：查询时刻的标签。
+    Instant,
+    /// 末态值：时间范围内最后一个非空标签。
+    LastInRange,
+}
+
+/// 从一组归属时序点中取"末态"标签值（最后一个非空字符串）。
+///
+/// `tagged_points` 是 (时间戳, 该标签值) 序列；空或全空返回空串。
+pub fn last_non_empty(tagged_points: &[(DateTime<Utc>, String)]) -> String {
+    tagged_points
+        .iter()
+        .rev()
+        .find(|(_, v)| !v.is_empty())
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +166,36 @@ mod tests {
         let pts = vec![(t(60), 50.0), (t(0), 50.0)];
         let s = aggregate(&pts).unwrap();
         assert_eq!(s.peak_time, t(0), "并列峰值应取最早时间戳");
+    }
+
+    #[test]
+    fn hbm_fallback_divides_used_by_total() {
+        let used = Series {
+            labels: Default::default(),
+            points: vec![(t(0), 50.0), (t(60), 60.0)],
+        };
+        let total = Series {
+            labels: Default::default(),
+            points: vec![(t(0), 200.0), (t(60), 0.0)], // t60 total=0 应被丢弃
+        };
+        let fb = hbm_fallback_series(&used, &total);
+        assert_eq!(fb.points.len(), 1);
+        assert!((fb.points[0].1 - 25.0).abs() < 1e-9); // 50/200*100
+    }
+
+    #[test]
+    fn last_non_empty_picks_latest_nonempty() {
+        let pts = vec![
+            (t(0), "pod-a".to_string()),
+            (t(60), "".to_string()),
+            (t(120), "pod-b".to_string()),
+        ];
+        assert_eq!(last_non_empty(&pts), "pod-b");
+    }
+
+    #[test]
+    fn last_non_empty_all_empty_returns_empty() {
+        let pts = vec![(t(0), "".to_string()), (t(60), "".to_string())];
+        assert_eq!(last_non_empty(&pts), "");
     }
 }
