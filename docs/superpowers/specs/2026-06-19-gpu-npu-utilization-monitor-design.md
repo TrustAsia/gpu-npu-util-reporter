@@ -128,17 +128,21 @@ struct DeviceSpec {
 
 enum MemoryStrategy {
     /// 直接读一个利用率指标，如 NPU 的 npu_chip_info_hbm_utilization
-    DirectMetric { metric: String, fallback: Option<Box<MemoryStrategy>> },
+    DirectMetric(DirectMetricBody),
     /// 用 used/(used+free)*100 组合，如 GPU 的 FB_USED/(FB_USED+FB_FREE)
-    CompositeRatio { used: String, free: String },
+    CompositeRatio(CompositeRatioBody),
     /// 用 used/total*100 组合，如 NPU fallback 的 hbm_used_memory / hbm_total_memory
-    CompositeFromTotal { used: String, total: String },
+    CompositeFromTotal(CompositeFromTotalBody),
 }
+
+// 各变体用 newtype 包装体承载字段；serde 用 #[serde(untagged)]
+// 使 YAML 形如 direct_metric: {...} / composite_ratio: {...} / composite_from_total: {...}
+// （serde_yaml 不支持默认 externally-tagged 的字段变体，untagged+newtype 是唯一干净方案）
 ```
 
 **预设**（写在 config 默认值 + 代码里兜底）：
-- `nvidia_a10` → core=`DCGM_FI_DEV_GPU_UTIL`, memory=`CompositeRatio{used=DCGM_FI_DEV_FB_USED, free=DCGM_FI_DEV_FB_FREE}`, card_id=`gpu`
-- `ascend_910b` → core=`npu_chip_info_utilization`, memory=`DirectMetric{metric=npu_chip_info_hbm_utilization, fallback=CompositeRatio{used=npu_chip_info_hbm_used_memory, free=npu_chip_info_hbm_total_memory}}`, card_id=`id`
+- `nvidia_a10` → core=`DCGM_FI_DEV_GPU_UTIL`, memory=`CompositeRatio{composite_ratio{used=DCGM_FI_DEV_FB_USED, free=DCGM_FI_DEV_FB_FREE}}`, card_id=`gpu`
+- `ascend_910b` → core=`npu_chip_info_utilization`, memory=`DirectMetric{direct_metric{metric=npu_chip_info_hbm_utilization, fallback=CompositeFromTotal{composite_from_total{used=npu_chip_info_hbm_used_memory, total=npu_chip_info_hbm_total_memory}}}}`, card_id=`id`
 
 > 注：NPU fallback 用 `used/total*100`（PRD §2.2 明确 `npu_chip_info_hbm_used_memory / npu_chip_info_hbm_total_memory`）。`CompositeRatio`（used/free）用于 GPU，`CompositeFromTotal`（used/total）用于 NPU fallback，两个变体分别匹配各自公式，processor 不做猜测。
 
@@ -384,14 +388,14 @@ devices:
     card_id_label: "gpu"
     labels: { container: "container", pod: "pod", namespace: "namespace" }
     memory:
-      composite: { used: "DCGM_FI_DEV_FB_USED", free: "DCGM_FI_DEV_FB_FREE" }
+      composite_ratio: { used: "DCGM_FI_DEV_FB_USED", free: "DCGM_FI_DEV_FB_FREE" }
   ascend_910b:
     display_name: "Ascend 910B"
     core_util_metric: "npu_chip_info_utilization"
     card_id_label: "id"
     labels: { container: "container_name", pod: "pod_name", namespace: "namespace" }
     memory:
-      direct: { metric: "npu_chip_info_hbm_utilization",
+      direct_metric: { metric: "npu_chip_info_hbm_utilization",
                 fallback: { composite_from_total: { used: "npu_chip_info_hbm_used_memory",
                                                     total: "npu_chip_info_hbm_total_memory" } } }
 
