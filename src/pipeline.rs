@@ -50,8 +50,8 @@ impl OwnershipMode {
     #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim() {
-            "instant" => OwnershipMode::Instant,
-            _ => OwnershipMode::LastInRange,
+            "instant" => Self::Instant,
+            _ => Self::LastInRange,
         }
     }
 }
@@ -383,10 +383,9 @@ fn last_label_value(series: &[Series], label: &str) -> String {
 
 /// 把一组点聚合成 (avg, peak, `peak_time`)，空则全 None。
 fn stat3(points: &[(DateTime<Utc>, f64)]) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
-    match aggregate(points) {
-        Some(s) => (Some(s.avg), Some(s.peak), Some(s.peak_time)),
-        None => (None, None, None),
-    }
+    aggregate(points).map_or((None, None, None), |s| {
+        (Some(s.avg), Some(s.peak), Some(s.peak_time))
+    })
 }
 
 /// 序列分组 `key`：`host_ip` + `card_id`（C3 join 也复用此 key）。

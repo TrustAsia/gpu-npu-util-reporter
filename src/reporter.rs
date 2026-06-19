@@ -45,6 +45,13 @@ pub fn render_to_buffer<S: BuildHasher>(
     let base_refs: Vec<&str> = spec.base_columns.iter().map(String::as_str).collect();
     let order = compute_column_order(&base_refs, mapping_columns);
 
+    // 构建借用的映射值索引：(行索引, 列名) → 资产值引用。
+    // 避免在 cell_value 热路径中每格分配 String 做 HashMap key 查询。
+    let mapping_borrowed: HashMap<(usize, &str), &str> = mapping_values
+        .iter()
+        .map(|((row, col), val)| ((*row, col.as_str()), val.as_str()))
+        .collect();
+
     let mut wb = Workbook::new();
     let sheet = wb
         .add_worksheet()
@@ -109,7 +116,7 @@ pub fn render_to_buffer<S: BuildHasher>(
             #[allow(clippy::cast_possible_truncation)]
             let col = idx as u16;
             let hit_color = hit_colors.get(name.as_str()).copied();
-            let v = cell_value(rec, name, mapping_values, row_idx);
+            let v = cell_value(rec, name, &mapping_borrowed, row_idx);
             // 累计该列内容的显示宽度（I6）。
             let text = match &v {
                 CellValue::Pct(p) => format_pct_text(*p),
@@ -122,10 +129,7 @@ pub fn render_to_buffer<S: BuildHasher>(
             }
             match v {
                 CellValue::Pct(p) => {
-                    let fmt = match hit_color {
-                        Some(hex) => pct_color(hex),
-                        None => pct_fmt.clone(),
-                    };
+                    let fmt = hit_color.map_or_else(|| pct_fmt.clone(), pct_color);
                     sheet
                         .write_number_with_format(excel_row, col, p / 100.0, &fmt)
                         .map_err(|e| AppError::Report {
@@ -177,10 +181,10 @@ enum CellValue {
 }
 
 /// 从 `CardRecord` + 资产值取出某列对应的单元格内容。
-fn cell_value<S: BuildHasher>(
+fn cell_value(
     rec: &CardRecord,
     col: &str,
-    mapping_values: &HashMap<(usize, String), String, S>,
+    mapping_borrowed: &HashMap<(usize, &str), &str>,
     row_idx: usize,
 ) -> CellValue {
     // 时间戳 → "YYYY-MM-DD HH:MM:SS" 字符串
@@ -212,11 +216,10 @@ fn cell_value<S: BuildHasher>(
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
         other => {
-            // 映射列：从 mapping_values 取，未命中写空串
-            match mapping_values.get(&(row_idx, other.to_string())) {
-                Some(v) => CellValue::Text(v.clone()),
-                None => CellValue::Text(String::new()),
-            }
+            // 映射列：从 mapping_borrowed 取，未命中写空串
+            mapping_borrowed
+                .get(&(row_idx, other))
+                .map_or_else(|| CellValue::Text(String::new()), |v| CellValue::Text((*v).to_string()))
         }
     }
 }
@@ -238,7 +241,7 @@ pub(crate) fn display_width(s: &str) -> f64 {
 }
 
 /// 判断字符是否按"宽"（≈2 个拉丁字符宽）估算。
-fn is_wide(c: char) -> bool {
+const fn is_wide(c: char) -> bool {
     let cp = c as u32;
     // CJK 统一表意、CJK 标点、全角 ASCII、平假名/片假名/谚文等常见区间。
     matches!(cp,

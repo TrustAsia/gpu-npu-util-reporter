@@ -19,7 +19,7 @@ pub const COL_MEM_PEAK: &str = "显存占用率峰值";
 /// 内部始终存储为 `#RRGGBB`（7 字符大写）——短格式 `#RGB` 在 `parse` 阶段
 /// 自动展开为 `#RRGGBB`，保证下游消费方（如 reporter 的 `u32::from_str_radix`）
 /// 无需关心短格式。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HexColor(String);
 
 impl HexColor {
@@ -69,7 +69,7 @@ impl serde::Serialize for HexColor {
 impl<'de> Deserialize<'de> for HexColor {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        HexColor::parse(&s, "<配置>").map_err(serde::de::Error::custom)
+        Self::parse(&s, "<配置>").map_err(serde::de::Error::custom)
     }
 }
 

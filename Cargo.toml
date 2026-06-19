@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "从多个 Prometheus 数据源提取 GPU/NPU 计算卡利用率与显存占用，聚合后生成带阈值染色的 Excel 报表。"
 license = "MIT"
+repository = "https://github.com/TrustAsia/gpu-npu-util-reporter"
+keywords = ["prometheus", "gpu", "npu", "utilization", "xlsx"]
+categories = ["command-line-utilities", "visualization"]
 
 [lib]
 name = "gpu_npu_util_reporter"
@@ -17,7 +20,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
+serde_yaml = "0.9"  # deprecated; migrate to serde_yaml_neo when API stabilizes
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"

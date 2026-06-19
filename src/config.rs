@@ -22,14 +22,14 @@ pub struct CliOverrides {
 }
 
 /// 时间范围配置。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TimeRangeConfig {
     pub start: String,
     pub end: String,
 }
 
 /// 单个 Prometheus 数据源。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceConfig {
     /// 别名，写入"数据来源"列。
     pub name: String,
@@ -40,12 +40,12 @@ pub struct SourceConfig {
     pub device_types: Vec<String>,
 }
 
-fn default_timeout() -> u64 {
+const fn default_timeout() -> u64 {
     30
 }
 
 /// 主机 IP 取值策略：优先标签，instance 兜底。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostIpConfig {
     #[serde(default = "default_prefer_label")]
     pub prefer_label: String,
@@ -56,7 +56,7 @@ fn default_prefer_label() -> String {
 }
 
 /// 归属取值模式。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OwnershipConfig {
     #[serde(default = "default_mode")]
     pub mode: String, // "instant" | "last_in_range"
@@ -67,14 +67,14 @@ fn default_mode() -> String {
 }
 
 /// 报表输出配置。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReportConfig {
     pub output_path: String,
     #[serde(default = "default_step")]
     pub query_step_secs: u64,
 }
 
-fn default_step() -> u64 {
+const fn default_step() -> u64 {
     60
 }
 

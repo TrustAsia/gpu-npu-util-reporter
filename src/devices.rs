@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// 标签名映射：把统一的逻辑归属字段映射到各 exporter 实际使用的标签名。
 ///
 /// 例如 NPU 用 `container_name`/`pod_name`，DCGM 常用 `container`/`pod`。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LabelMapping {
     /// 容器标签名。
     pub container: String,
@@ -28,7 +28,7 @@ pub struct LabelMapping {
 /// `composite_ratio: { used, free }` / `direct_metric: { metric, fallback }` /
 /// `composite_from_total: { used, total }`（外部命名的单键 map），兼容 `serde_yaml`
 /// 对带字段变体的限制（`serde_yaml` 不支持默认的 externally-tagged 字段变体）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum MemoryStrategy {
     /// used/(used+free)*100 组合（如 GPU 的 `FB_USED/(FB_USED+FB_FREE)`）。
@@ -41,34 +41,34 @@ pub enum MemoryStrategy {
 }
 
 /// `composite_ratio` 包装体。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompositeRatioBody {
     pub composite_ratio: UsedFree,
 }
 /// `composite_from_total` 包装体。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompositeFromTotalBody {
     pub composite_from_total: UsedTotal,
 }
 /// `direct_metric` 包装体。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectMetricBody {
     pub direct_metric: DirectInner,
 }
 /// used/free 两个字段。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsedFree {
     pub used: String,
     pub free: String,
 }
 /// used/total 两个字段。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsedTotal {
     pub used: String,
     pub total: String,
 }
 /// direct 指标 + 可选 fallback。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectInner {
     pub metric: String,
     #[serde(default)]
@@ -79,7 +79,7 @@ impl MemoryStrategy {
     /// 便捷构造：GPU 组合公式。
     #[must_use]
     pub fn composite_ratio(used: &str, free: &str) -> Self {
-        MemoryStrategy::CompositeRatio(CompositeRatioBody {
+        Self::CompositeRatio(CompositeRatioBody {
             composite_ratio: UsedFree {
                 used: used.into(),
                 free: free.into(),
@@ -89,7 +89,7 @@ impl MemoryStrategy {
     /// 便捷构造：NPU used/total 组合。
     #[must_use]
     pub fn composite_from_total(used: &str, total: &str) -> Self {
-        MemoryStrategy::CompositeFromTotal(CompositeFromTotalBody {
+        Self::CompositeFromTotal(CompositeFromTotalBody {
             composite_from_total: UsedTotal {
                 used: used.into(),
                 total: total.into(),
@@ -97,8 +97,8 @@ impl MemoryStrategy {
         })
     }
     /// 便捷构造：direct 指标 + 可选 fallback。
-    pub fn direct(metric: &str, fallback: Option<MemoryStrategy>) -> Self {
-        MemoryStrategy::DirectMetric(DirectMetricBody {
+    pub fn direct(metric: &str, fallback: Option<Self>) -> Self {
+        Self::DirectMetric(DirectMetricBody {
             direct_metric: DirectInner {
                 metric: metric.into(),
                 fallback: fallback.map(Box::new),
@@ -108,7 +108,7 @@ impl MemoryStrategy {
 }
 
 /// 一个设备类型的完整"指标配方"。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceSpec {
     /// 报表"设备类型"列显示名，如 "NVIDIA A10"。
     pub display_name: String,

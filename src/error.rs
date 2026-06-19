@@ -60,8 +60,8 @@ impl AppError {
     /// 预留接口，供未来告警统一化使用。
     #[must_use]
     #[allow(dead_code)]
-    pub fn is_warning(&self) -> bool {
-        matches!(self, AppError::Warning { .. })
+    pub const fn is_warning(&self) -> bool {
+        matches!(self, Self::Warning { .. })
     }
 }
 

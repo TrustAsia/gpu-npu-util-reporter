@@ -120,6 +120,7 @@ async fn main() -> ExitCode {
 
     // 5. 资产映射（可选）
     let mut mapping_values: HashMap<(usize, String), String> = HashMap::new();
+    #[allow(clippy::option_if_let_else)]
     let mapping_columns: Vec<mapper::MappingColumn> = if let Some(m) = &cfg.mapping {
         if m.enabled {
             match mapper::load_asset_table(&m.source_path, &m.match_keys) {

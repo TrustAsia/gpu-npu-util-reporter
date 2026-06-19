@@ -36,7 +36,7 @@ pub const BASE_COLUMNS: &[&str] = &[
 ///
 /// serde 表示为一个对象 `{ direction: before|after, anchor: <列名> }`，
 /// 而非外部标记枚举——因为 `serde_yaml` 不支持默认的 externally-tagged 变体。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InsertPosition {
     /// 方向：`before` 或 `after`。
     pub direction: Direction,
@@ -45,7 +45,7 @@ pub struct InsertPosition {
 }
 
 /// 插入方向。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     Before,
@@ -56,7 +56,7 @@ impl InsertPosition {
     /// 便捷构造：锚点列之前。
     #[allow(dead_code)]
     pub fn before(anchor: impl Into<String>) -> Self {
-        InsertPosition {
+        Self {
             direction: Direction::Before,
             anchor: anchor.into(),
         }
@@ -64,7 +64,7 @@ impl InsertPosition {
     /// 便捷构造：锚点列之后。
     #[allow(dead_code)]
     pub fn after(anchor: impl Into<String>) -> Self {
-        InsertPosition {
+        Self {
             direction: Direction::After,
             anchor: anchor.into(),
         }
@@ -72,7 +72,7 @@ impl InsertPosition {
 }
 
 /// 单个映射列的配置。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MappingColumn {
     /// 资产表源列名。
     pub source_field: String,
@@ -83,7 +83,7 @@ pub struct MappingColumn {
 }
 
 /// 匹配键：从 `CardRecord` / 资产行取哪些字段拼 join key。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKey {
     HostIp,
@@ -92,7 +92,7 @@ pub enum MatchKey {
 }
 
 /// 资产映射总配置。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MappingConfig {
     pub enabled: bool,
     /// 资产表路径（按扩展名分流 CSV/Excel）。
@@ -105,7 +105,7 @@ pub struct MappingConfig {
 type AssetRow = HashMap<String, String>;
 
 /// 资产表里 `match_key` 对应的列名（约定与 `CardRecord` 字段同名）。
-fn asset_key_label(k: &MatchKey) -> &'static str {
+const fn asset_key_label(k: &MatchKey) -> &'static str {
     match k {
         MatchKey::HostIp => "host_ip",
         MatchKey::CardId => "card_id",
@@ -168,18 +168,16 @@ pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Ve
     // 目标 index 仅取决于基础列（锚点被约束为基础列），互不影响
     let mut placements: Vec<(usize, String)> = mapping_cols
         .iter()
-        .map(
-            |c| match base.iter().position(|x| *x == c.position.anchor) {
-                Some(idx) => {
-                    let target = match c.position.direction {
-                        Direction::Before => idx,
-                        Direction::After => idx + 1,
-                    };
-                    (target, c.rename.clone())
-                }
-                None => (result.len(), c.rename.clone()),
-            },
-        )
+        .map(|c| {
+            let target = base
+                .iter()
+                .position(|x| *x == c.position.anchor)
+                .map_or(result.len(), |idx| match c.position.direction {
+                    Direction::Before => idx,
+                    Direction::After => idx + 1,
+                });
+            (target, c.rename.clone())
+        })
         .collect();
     // 稳定排序后从后往前插入：同 index 的多列按配置顺序堆叠
     placements.sort_by_key(|(idx, _)| *idx);
