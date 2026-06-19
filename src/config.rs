@@ -15,6 +15,8 @@ use std::collections::HashMap;
 pub struct CliOverrides {
     pub start: Option<String>,
     pub end: Option<String>,
+    /// 记录配置文件来源路径（保留供诊断/日志，当前未在编排中读取）。
+    #[allow(dead_code)]
     pub config_path: Option<String>,
     pub output: Option<String>,
 }

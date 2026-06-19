@@ -46,7 +46,7 @@ pub struct CardRecord {
 }
 
 /// 一个带标签的时序序列（由 fetcher 产出）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Series {
     /// Prometheus 标签集合。
     pub labels: std::collections::HashMap<String, String>,
@@ -118,6 +118,10 @@ pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
 }
 
 /// 归属取值模式（PRD §2.4）。
+///
+/// 预留给完整的 last_in_range 归属实现；当前 main 用 range 查询的标签瞬时值
+/// 近似归属，故枚举与 `last_non_empty` 暂未在编排中调用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnershipMode {
     /// 瞬时值：查询时刻的标签。
@@ -129,6 +133,8 @@ pub enum OwnershipMode {
 /// 从一组归属时序点中取"末态"标签值（最后一个非空字符串）。
 ///
 /// `tagged_points` 是 (时间戳, 该标签值) 序列；空或全空返回空串。
+/// 预留给完整的 last_in_range 归属实现。
+#[allow(dead_code)]
 pub fn last_non_empty(tagged_points: &[(DateTime<Utc>, String)]) -> String {
     tagged_points
         .iter()

@@ -54,6 +54,7 @@ pub enum Direction {
 
 impl InsertPosition {
     /// 便捷构造：锚点列之前。
+    #[allow(dead_code)]
     pub fn before(anchor: impl Into<String>) -> Self {
         InsertPosition {
             direction: Direction::Before,
@@ -61,6 +62,7 @@ impl InsertPosition {
         }
     }
     /// 便捷构造：锚点列之后。
+    #[allow(dead_code)]
     pub fn after(anchor: impl Into<String>) -> Self {
         InsertPosition {
             direction: Direction::After,

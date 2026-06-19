@@ -24,6 +24,10 @@ pub trait MetricFetcher: Send + Sync {
     ) -> Result<Vec<Series>, AppError>;
 
     /// instant query：返回当前时刻的标签值集合。
+    ///
+    /// 预留给 `ownership.mode = instant` 的归属瞬时查询；当前 main 用 range
+    /// 查询的标签值取归属，故暂未在编排中调用。
+    #[allow(dead_code)]
     async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError>;
 }
 

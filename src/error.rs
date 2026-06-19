@@ -45,12 +45,16 @@ pub enum AppError {
     Report { detail: String },
 
     /// 非致命警告：仅记录、不中断。
+    /// 预留给未来"单卡失败降级告警"的统一通道，当前 main 直接收集字符串。
+    #[allow(dead_code)]
     #[error("[警告] {msg}")]
     Warning { msg: String },
 }
 
 impl AppError {
     /// 判断是否为非致命警告（调用方据此决定是否继续）。
+    /// 预留接口，供未来告警统一化使用。
+    #[allow(dead_code)]
     pub fn is_warning(&self) -> bool {
         matches!(self, AppError::Warning { .. })
     }
