@@ -6,6 +6,7 @@ mod fetcher;
 mod highlight;
 mod mapper;
 mod processor;
+mod reporter;
 
 fn main() {
     println!("gpu-util-monitor: 脚手架就绪");
