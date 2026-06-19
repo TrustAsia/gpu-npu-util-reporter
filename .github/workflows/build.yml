@@ -25,7 +25,7 @@ jobs:
             os: ubuntu-latest
             suffix: ""
             use-zigbuild: true
-          - target: x86_64-pc-windows-gnullvm
+          - target: x86_64-pc-windows-msvc
             os: windows-latest
             suffix: .exe
             use-zigbuild: false
@@ -45,13 +45,13 @@ jobs:
       # ---- zigbuild 交叉编译（darwin 目标在 Linux 上编译）----
       - name: Install Zig
         if: matrix.use-zigbuild
-        uses: mlugg/setup-zig@v1
+        uses: goto-bus-stop/setup-zig@v2
         with:
           version: "0.13"
 
       - name: Install cargo-zigbuild
         if: matrix.use-zigbuild
-        run: pip3 install ziglang cargo-zigbuild
+        run: pip3 install cargo-zigbuild
 
       - name: Build with zigbuild
         if: matrix.use-zigbuild
@@ -60,19 +60,6 @@ jobs:
       - name: Test with zigbuild
         if: matrix.use-zigbuild
         run: cargo test --target ${{ matrix.target }}
-
-      # ---- Windows gnullvm: 安装 LLVM + 配置 linker ----
-      - name: Install LLVM (gnullvm)
-        if: matrix.target == 'x86_64-pc-windows-gnullvm'
-        run: |
-          choco install llvm -y --no-progress
-
-      - name: Configure gnullvm linker
-        if: matrix.target == 'x86_64-pc-windows-gnullvm'
-        shell: bash
-        run: |
-          mkdir -p .cargo
-          printf '[target.x86_64-pc-windows-gnullvm]\nlinker = "rust-lld"\n' >> .cargo/config.toml
 
       # ---- Linux musl: 安装 musl-tools + 静态链接 ----
       - name: Install musl-tools
