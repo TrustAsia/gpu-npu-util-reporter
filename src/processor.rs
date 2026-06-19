@@ -81,14 +81,11 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(tb.cmp(ta))
     });
-    match best {
-        Some((peak_time, peak)) => Some(MetricStats {
-            avg,
-            peak,
-            peak_time,
-        }),
-        None => None,
-    }
+    best.map(|(peak_time, peak)| MetricStats {
+        avg,
+        peak,
+        peak_time,
+    })
 }
 
 /// HBM fallback：当直接利用率指标为空时，用 used/total*100 重算显存占用率序列。
@@ -117,24 +114,10 @@ pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
     }
 }
 
-/// 归属取值模式（PRD §2.4）。
-///
-/// 预留给完整的 last_in_range 归属实现；当前 main 用 range 查询的标签瞬时值
-/// 近似归属，故枚举与 `last_non_empty` 暂未在编排中调用。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnershipMode {
-    /// 瞬时值：查询时刻的标签。
-    Instant,
-    /// 末态值：时间范围内最后一个非空标签。
-    LastInRange,
-}
-
 /// 从一组归属时序点中取"末态"标签值（最后一个非空字符串）。
 ///
 /// `tagged_points` 是 (时间戳, 该标签值) 序列；空或全空返回空串。
-/// 预留给完整的 last_in_range 归属实现。
-#[allow(dead_code)]
+/// 由 pipeline 的 last_in_range 归属模式调用（PRD §2.4）。
 pub fn last_non_empty(tagged_points: &[(DateTime<Utc>, String)]) -> String {
     tagged_points
         .iter()

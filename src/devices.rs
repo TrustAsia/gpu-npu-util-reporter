@@ -185,10 +185,7 @@ mod tests {
             MemoryStrategy::DirectMetric(b) => {
                 assert_eq!(b.direct_metric.metric, "npu_chip_info_hbm_utilization");
                 let fb = b.direct_metric.fallback.as_ref().expect("应有 fallback");
-                assert!(matches!(
-                    fb.as_ref(),
-                    MemoryStrategy::CompositeFromTotal(_)
-                ));
+                assert!(matches!(fb.as_ref(), MemoryStrategy::CompositeFromTotal(_)));
             }
             other => panic!("期望 DirectMetric，得到 {:?}", other),
         }

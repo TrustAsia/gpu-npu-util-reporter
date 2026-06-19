@@ -213,8 +213,10 @@ mod tests {
     fn above_trigger_hits_when_value_greater() {
         let mut r = empty_record();
         r.core_avg = Some(85.0);
-        let mut tr = ThresholdTriggers::default();
-        tr.core_avg_above = Some(trig(true, 80.0, "#FF0000"));
+        let tr = ThresholdTriggers {
+            core_avg_above: Some(trig(true, 80.0, "#FF0000")),
+            ..Default::default()
+        };
         let hits = tr.evaluate_row(&r);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].column, COL_CORE_AVG);
@@ -225,8 +227,10 @@ mod tests {
     fn above_does_not_hit_at_boundary_equal() {
         let mut r = empty_record();
         r.core_avg = Some(80.0); // 等于阈值，严格 > 不命中
-        let mut tr = ThresholdTriggers::default();
-        tr.core_avg_above = Some(trig(true, 80.0, "#FF0000"));
+        let tr = ThresholdTriggers {
+            core_avg_above: Some(trig(true, 80.0, "#FF0000")),
+            ..Default::default()
+        };
         assert!(tr.evaluate_row(&r).is_empty());
     }
 
@@ -234,8 +238,10 @@ mod tests {
     fn below_trigger_hits_when_value_lower() {
         let mut r = empty_record();
         r.mem_peak = Some(3.0);
-        let mut tr = ThresholdTriggers::default();
-        tr.mem_peak_below = Some(trig(true, 5.0, "#FFA500"));
+        let tr = ThresholdTriggers {
+            mem_peak_below: Some(trig(true, 5.0, "#FFA500")),
+            ..Default::default()
+        };
         let hits = tr.evaluate_row(&r);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].column, COL_MEM_PEAK);
@@ -245,16 +251,20 @@ mod tests {
     fn disabled_trigger_is_skipped() {
         let mut r = empty_record();
         r.core_avg = Some(99.0);
-        let mut tr = ThresholdTriggers::default();
-        tr.core_avg_above = Some(trig(false, 80.0, "#FF0000")); // 关闭
+        let tr = ThresholdTriggers {
+            core_avg_above: Some(trig(false, 80.0, "#FF0000")), // 关闭
+            ..Default::default()
+        };
         assert!(tr.evaluate_row(&r).is_empty());
     }
 
     #[test]
     fn none_field_is_skipped() {
         let r = empty_record(); // core_avg = None
-        let mut tr = ThresholdTriggers::default();
-        tr.core_avg_above = Some(trig(true, 80.0, "#FF0000"));
+        let tr = ThresholdTriggers {
+            core_avg_above: Some(trig(true, 80.0, "#FF0000")),
+            ..Default::default()
+        };
         assert!(tr.evaluate_row(&r).is_empty());
     }
 
@@ -263,9 +273,11 @@ mod tests {
         // above 与 below 同列都配且都命中，取 above（字段顺序在前）
         let mut r = empty_record();
         r.core_avg = Some(50.0);
-        let mut tr = ThresholdTriggers::default();
-        tr.core_avg_above = Some(trig(true, 40.0, "#FF0000"));
-        tr.core_avg_below = Some(trig(true, 60.0, "#FFA500"));
+        let tr = ThresholdTriggers {
+            core_avg_above: Some(trig(true, 40.0, "#FF0000")),
+            core_avg_below: Some(trig(true, 60.0, "#FFA500")),
+            ..Default::default()
+        };
         let hits = tr.evaluate_row(&r);
         assert_eq!(hits.len(), 1, "同列只产生一个命中");
         assert_eq!(hits[0].color.0, "#FF0000");
@@ -276,9 +288,11 @@ mod tests {
         let mut r = empty_record();
         r.core_avg = Some(90.0);
         r.mem_avg = Some(2.0);
-        let mut tr = ThresholdTriggers::default();
-        tr.core_avg_above = Some(trig(true, 80.0, "#FF0000"));
-        tr.mem_avg_below = Some(trig(true, 10.0, "#FFA500"));
+        let tr = ThresholdTriggers {
+            core_avg_above: Some(trig(true, 80.0, "#FF0000")),
+            mem_avg_below: Some(trig(true, 10.0, "#FFA500")),
+            ..Default::default()
+        };
         let hits = tr.evaluate_row(&r);
         assert_eq!(hits.len(), 2);
     }

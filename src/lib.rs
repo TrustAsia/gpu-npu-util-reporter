@@ -7,5 +7,6 @@ pub mod error;
 pub mod fetcher;
 pub mod highlight;
 pub mod mapper;
+pub mod pipeline;
 pub mod processor;
 pub mod reporter;

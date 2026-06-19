@@ -10,14 +10,16 @@ use thiserror::Error;
 ///
 /// 设计意图：把所有可预见的失败场景枚举化，每个变体携带足够定位的字段，
 /// 其 `Display` 输出即面向终端用户的中文提示。
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum AppError {
     /// 配置文件解析或字段缺失等致命错误。
     #[error("[错误] 配置文件 {path} 解析失败：{reason}")]
     Config { path: String, reason: String },
 
     /// 无法连接到 Prometheus（网络层）。
-    #[error("[错误] 无法连接到 Prometheus 数据源 {source_name}（{url}），请检查网络或配置：{detail}")]
+    #[error(
+        "[错误] 无法连接到 Prometheus 数据源 {source_name}（{url}），请检查网络或配置：{detail}"
+    )]
     Prometheus {
         source_name: String,
         url: String,
@@ -33,7 +35,9 @@ pub enum AppError {
     TimeFormat { raw: String },
 
     /// 阈值染色颜色不是合法 HEX。
-    #[error("[错误] 阈值触发器 {trigger} 的颜色 {raw} 不是合法的 HEX 颜色（需为 #RRGGBB 或 #RGB）")]
+    #[error(
+        "[错误] 阈值触发器 {trigger} 的颜色 {raw} 不是合法的 HEX 颜色（需为 #RRGGBB 或 #RGB）"
+    )]
     InvalidColor { trigger: String, raw: String },
 
     /// 资产表加载或解析失败。

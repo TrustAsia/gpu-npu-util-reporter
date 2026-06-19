@@ -18,14 +18,21 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: ubuntu-latest
             suffix: ""
+            use-zigbuild: true
+          - target: aarch64-apple-darwin
+            os: ubuntu-latest
+            suffix: ""
+            use-zigbuild: true
           - target: x86_64-pc-windows-gnullvm
             os: windows-latest
             suffix: .exe
+            use-zigbuild: false
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             suffix: ""
+            use-zigbuild: false
 
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +41,25 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # ---- zigbuild 交叉编译（darwin 目标在 Linux 上编译）----
+      - name: Install Zig
+        if: matrix.use-zigbuild
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.13"
+
+      - name: Install cargo-zigbuild
+        if: matrix.use-zigbuild
+        run: pip3 install ziglang cargo-zigbuild
+
+      - name: Build with zigbuild
+        if: matrix.use-zigbuild
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Test with zigbuild
+        if: matrix.use-zigbuild
+        run: cargo test --target ${{ matrix.target }}
 
       # ---- Windows gnullvm: 安装 LLVM + 配置 linker ----
       - name: Install LLVM (gnullvm)
@@ -58,9 +84,11 @@ jobs:
         run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
 
       - name: Build
+        if: ${{ !matrix.use-zigbuild }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
+        if: ${{ !matrix.use-zigbuild }}
         run: cargo test --target ${{ matrix.target }}
 
       - name: Upload artifact

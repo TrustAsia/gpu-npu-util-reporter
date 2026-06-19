@@ -118,7 +118,7 @@ report:
 - 首行冻结 + 加粗 + 深蓝底白字。
 - 利用率列百分比格式（`0.00%`），N/A 单元格写字符串 `N/A`（不参与染色）。
 - 时间列以 `YYYY-MM-DD HH:MM:SS` 文本输出。
-- 列宽自适应（clamp 到 [10, 40]）。
+- 列宽自适应（clamp 到 [10, 50]）。
 
 ## 架构
 
@@ -141,8 +141,8 @@ src/
 ## 开发
 
 ```bash
-cargo test          # 33 个测试（单元 + 端到端渲染回读）
-cargo build         # 零 warning
+cargo test          # 46 个测试（单元 + 端到端渲染回读）
+cargo clippy        # 零 warning
 ```
 
 测试覆盖：聚合算法边界、HBM fallback、8 触发器各方向命中 / 跳过 / 同列取首、HEX 校验、列位置排布、Join 命中 / 未命中、默认配置 round-trip、端到端 xlsx 渲染回读。

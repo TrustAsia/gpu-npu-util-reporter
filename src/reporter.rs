@@ -68,19 +68,22 @@ pub fn render_to_buffer(
                 detail: format!("写表头失败：{e}"),
             })?;
     }
-    sheet
-        .set_freeze_panes(1, 0)
-        .map_err(|e| AppError::Report {
-            detail: format!("冻结首行失败：{e}"),
-        })?;
+    sheet.set_freeze_panes(1, 0).map_err(|e| AppError::Report {
+        detail: format!("冻结首行失败：{e}"),
+    })?;
 
-    // 命中染色单元格的百分比 Format 构造器（按 HEX）
+    // 命中染色单元格的百分比 Format 构造器（按 HEX）。
+    // HexColor 已在反序列化/parse 阶段校验为 #RRGGBB（大写），此处解析必然成功；
+    // 若因代码 bug 导致意外值，用 match 显式回退到红色（而非静默变黑）。
     let pct_color = |hex: &HexColor| -> Format {
         let rgb = u32::from_str_radix(&hex.0[1..], 16).unwrap_or(0xFF0000);
         Format::new()
             .set_background_color(Color::RGB(rgb))
             .set_num_format("0.00%")
     };
+
+    // 每列内容的显示宽度（CJK 约占 2 个拉丁字符宽），用于列宽自适应（I6 修复）。
+    let mut col_max_width: Vec<f64> = vec![0.0; order.len()];
 
     for (row_idx, rec) in records.iter().enumerate() {
         let excel_row = (row_idx + 1) as u32;
@@ -90,9 +93,20 @@ pub fn render_to_buffer(
             hits.iter().map(|h| (h.column, h.color)).collect();
 
         for name in &order {
-            let col = *col_index.get(name.as_str()).unwrap_or(&0) as u16;
+            let idx = *col_index.get(name.as_str()).unwrap_or(&0);
+            let col = idx as u16;
             let hit_color = hit_colors.get(name.as_str()).copied();
             let v = cell_value(rec, name, mapping_values, row_idx);
+            // 累计该列内容的显示宽度（I6）。
+            let text = match &v {
+                CellValue::Pct(p) => format_pct_text(*p),
+                CellValue::Text(t) => t.clone(),
+                CellValue::Na => "N/A".into(),
+            };
+            let w = display_width(&text);
+            if w > col_max_width[idx] {
+                col_max_width[idx] = w;
+            }
             match v {
                 CellValue::Pct(p) => {
                     let fmt = match hit_color {
@@ -123,10 +137,12 @@ pub fn render_to_buffer(
         }
     }
 
-    // 列宽自适应（按列名长度估算，clamp 到 [10, 40]）
+    // 列宽自适应：取 max(表头宽度, 内容宽度)，按 CJK 双倍宽估算，clamp [10, 50]（I6）。
     for (i, name) in order.iter().enumerate() {
-        let width = (name.chars().count() as f64 * 1.6 + 4.0).clamp(10.0, 40.0);
-        let _ = sheet.set_column_width(i as u16, width as f64);
+        let header_w = display_width(name);
+        let content_w = col_max_width.get(i).copied().unwrap_or(0.0);
+        let width = header_w.max(content_w).clamp(10.0, 50.0);
+        let _ = sheet.set_column_width(i as u16, width);
     }
 
     wb.save_to_buffer().map_err(|e| AppError::Report {
@@ -189,5 +205,73 @@ fn cell_value(
                 None => CellValue::Text(String::new()),
             }
         }
+    }
+}
+
+/// 估算字符串在 Excel 列里的显示宽度（用于 I6 列宽自适应）。
+///
+/// 规则：CJK 字符（含全角标点）按 2 个单位计，其余按 1 个单位；末尾留 ~2 单位
+/// padding。例如 "192.168.100.200"（15 半角）→ 17；"核心利用率峰值"（7 CJK）→ 16。
+pub(crate) fn display_width(s: &str) -> f64 {
+    let mut w = 0.0;
+    for c in s.chars() {
+        if is_wide(c) {
+            w += 2.0;
+        } else {
+            w += 1.0;
+        }
+    }
+    w + 2.0 // padding
+}
+
+/// 判断字符是否按"宽"（≈2 个拉丁字符宽）估算。
+fn is_wide(c: char) -> bool {
+    let cp = c as u32;
+    // CJK 统一表意、CJK 标点、全角 ASCII、平假名/片假名/谚文等常见区间。
+    matches!(cp,
+        0x1100..=0x115F |     // 谚文 Jamo
+        0x2E80..=0x303E |     // CJK 部首/标点
+        0x3041..=0x33FF |     // 平假名/片假名/CJK 符号
+        0x3400..=0x4DBF |     // CJK 扩展 A
+        0x4E00..=0x9FFF |     // CJK 统一表意
+        0xA000..=0xA4CF |     // 彝文
+        0xAC00..=0xD7A3 |     // 谚文音节
+        0xF900..=0xFAFF |     // CJK 兼容表意
+        0xFE30..=0xFE4F |     // CJK 兼容形式
+        0xFF00..=0xFF60 |     // 全角 ASCII
+        0xFFE0..=0xFFE6       // 全角符号
+    )
+}
+
+/// 把 0–100 的利用率值格式化为报表里会显示的文本（用于估算列宽，与 0.00% 格式一致）。
+fn format_pct_text(v: f64) -> String {
+    format!("{:.2}%", v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_width_counts_cjk_as_double() {
+        // 7 个 CJK → 14 + 2 padding = 16
+        assert!((display_width("核心利用率峰值") - 16.0).abs() < 1e-9);
+        // 15 个半角 → 15 + 2 = 17
+        assert!((display_width("192.168.100.200") - 17.0).abs() < 1e-9);
+        // 时间戳 "2026-06-18 00:00:00" 19 半角 → 21
+        assert!((display_width("2026-06-18 00:00:00") - 21.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn display_width_handles_mixed_and_empty() {
+        // "主机IP" = 2 CJK + 2 ASCII = 6 + 2 padding = 8
+        assert!((display_width("主机IP") - 8.0).abs() < 1e-9);
+        assert!((display_width("") - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn format_pct_text_matches_excel_format() {
+        assert_eq!(format_pct_text(90.0), "90.00%");
+        assert_eq!(format_pct_text(22.5), "22.50%");
     }
 }

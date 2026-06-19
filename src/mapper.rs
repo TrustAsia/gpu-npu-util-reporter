@@ -143,16 +143,31 @@ fn join_key(rec: &CardRecord, keys: &[MatchKey]) -> String {
 /// 唯一确定、互不影响，一次性计算即可。按 index 升序、同 index 按 config
 /// 顺序从后往前插入到 `result`（保持同 index 列按配置顺序堆叠）。
 /// 锚点不在基础列中时该列追加到末尾。
-pub fn compute_column_order(
-    base: &[&str],
-    mapping_cols: &[MappingColumn],
-) -> Vec<String> {
+/// 检测锚点不在基础列中的映射列，返回对应的 Warning 消息（PRD §2.3）。
+///
+/// PRD §2.3 锚点约束：映射列的位置锚点必须是基础列之一；否则记 Warning 并把
+/// 该列追加到末尾（追加行为在 [`compute_column_order`] 中实现）。本函数只负责
+/// 产出 Warning 文本，由 main 统一收集打印，便于单元测试。
+pub fn missing_anchor_warnings(base: &[&str], mapping_cols: &[MappingColumn]) -> Vec<String> {
+    mapping_cols
+        .iter()
+        .filter(|c| !base.iter().any(|b| *b == c.position.anchor))
+        .map(|c| {
+            format!(
+                "[警告] 映射列「{}」的锚点「{}」不是基础列，已追加到末尾",
+                c.rename, c.position.anchor
+            )
+        })
+        .collect()
+}
+
+pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Vec<String> {
     let mut result: Vec<String> = base.iter().map(|s| s.to_string()).collect();
     // 目标 index 仅取决于基础列（锚点被约束为基础列），互不影响
     let mut placements: Vec<(usize, String)> = mapping_cols
         .iter()
-        .map(|c| {
-            match base.iter().position(|x| *x == c.position.anchor) {
+        .map(
+            |c| match base.iter().position(|x| *x == c.position.anchor) {
                 Some(idx) => {
                     let target = match c.position.direction {
                         Direction::Before => idx,
@@ -161,8 +176,8 @@ pub fn compute_column_order(
                     (target, c.rename.clone())
                 }
                 None => (result.len(), c.rename.clone()),
-            }
-        })
+            },
+        )
         .collect();
     // 稳定排序后从后往前插入：同 index 的多列按配置顺序堆叠
     placements.sort_by_key(|(idx, _)| *idx);
@@ -175,10 +190,7 @@ pub fn compute_column_order(
 
 /// 加载资产表，并为每行注入 `@key`（由 match_keys 指定的列拼成）。
 /// 按扩展名分流：`.csv` 用 csv crate，`.xlsx`/`.xls` 用 calamine。首行视为表头。
-pub fn load_asset_table(
-    path: &str,
-    match_keys: &[MatchKey],
-) -> Result<Vec<AssetRow>, AppError> {
+pub fn load_asset_table(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppError> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".csv") {
         load_csv(path, match_keys)
@@ -235,18 +247,16 @@ fn load_xlsx(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppEr
     })?;
     let name = book
         .sheet_names()
-        .get(0)
+        .first()
         .cloned()
         .ok_or_else(|| AppError::Mapping {
             path: path.into(),
             detail: "Excel 无工作表".into(),
         })?;
-    let range = book
-        .worksheet_range(&name)
-        .map_err(|e| AppError::Mapping {
-            path: path.into(),
-            detail: format!("读取工作表失败：{e}"),
-        })?;
+    let range = book.worksheet_range(&name).map_err(|e| AppError::Mapping {
+        path: path.into(),
+        detail: format!("读取工作表失败：{e}"),
+    })?;
     let mut iter = range.rows();
     let header = iter.next().ok_or_else(|| AppError::Mapping {
         path: path.into(),
@@ -388,5 +398,36 @@ mod tests {
 
         let miss = join_record(&rec("2.2.2.2", "0"), &assets, &cfg);
         assert!(miss.is_empty());
+    }
+
+    #[test]
+    fn missing_anchor_warnings_reports_non_base_anchors() {
+        // PRD §2.3：锚点必须是基础列。一个合法 + 一个非法锚点。
+        let cols = vec![
+            MappingColumn {
+                source_field: "机房".into(),
+                rename: "机房".into(),
+                position: InsertPosition::after("主机IP"), // 合法（基础列）
+            },
+            MappingColumn {
+                source_field: "x".into(),
+                rename: "X".into(),
+                position: InsertPosition::after("不存在"), // 非法
+            },
+        ];
+        let ws = missing_anchor_warnings(BASE_COLUMNS, &cols);
+        assert_eq!(ws.len(), 1, "只对非法锚点产出 Warning");
+        assert!(ws[0].contains("X"));
+        assert!(ws[0].contains("不存在"));
+    }
+
+    #[test]
+    fn missing_anchor_warnings_empty_for_all_base_anchors() {
+        let cols = vec![MappingColumn {
+            source_field: "机房".into(),
+            rename: "机房".into(),
+            position: InsertPosition::before("设备类型"),
+        }];
+        assert!(missing_anchor_warnings(BASE_COLUMNS, &cols).is_empty());
     }
 }

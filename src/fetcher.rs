@@ -25,9 +25,7 @@ pub trait MetricFetcher: Send + Sync {
 
     /// instant query：返回当前时刻的标签值集合。
     ///
-    /// 预留给 `ownership.mode = instant` 的归属瞬时查询；当前 main 用 range
-    /// 查询的标签值取归属，故暂未在编排中调用。
-    #[allow(dead_code)]
+    /// 用于 `ownership.mode = instant` 的归属瞬时查询（PRD §2.4）。
     async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError>;
 }
 
@@ -89,10 +87,7 @@ impl MetricFetcher for PrometheusFetcher {
         end: DateTime<Utc>,
         step: Duration,
     ) -> Result<Vec<Series>, AppError> {
-        let url = format!(
-            "{}/api/v1/query_range",
-            self.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/api/v1/query_range", self.base_url.trim_end_matches('/'));
         let resp = self
             .client
             .get(&url)
@@ -110,14 +105,11 @@ impl MetricFetcher for PrometheusFetcher {
                 url: self.base_url.clone(),
                 detail: format!("连接失败：{e}"),
             })?;
-        let body: PromResponse = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Prometheus {
-                source_name: self.source_name.clone(),
-                url: self.base_url.clone(),
-                detail: format!("解析响应失败：{e}"),
-            })?;
+        let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
+            source_name: self.source_name.clone(),
+            url: self.base_url.clone(),
+            detail: format!("解析响应失败：{e}"),
+        })?;
         parse_response(body, &self.source_name)
     }
 
@@ -135,14 +127,11 @@ impl MetricFetcher for PrometheusFetcher {
                 url: self.base_url.clone(),
                 detail: format!("连接失败：{e}"),
             })?;
-        let body: PromResponse = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Prometheus {
-                source_name: self.source_name.clone(),
-                url: self.base_url.clone(),
-                detail: format!("解析响应失败：{e}"),
-            })?;
+        let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
+            source_name: self.source_name.clone(),
+            url: self.base_url.clone(),
+            detail: format!("解析响应失败：{e}"),
+        })?;
         parse_response(body, &self.source_name)
     }
 }
@@ -163,6 +152,12 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
                 let mut points = Vec::with_capacity(values.len());
                 for (ts, val) in values {
                     if let Ok(v) = val.parse::<f64>() {
+                        // I4 修复：丢弃 NaN/Inf。Prometheus 可能返回 NaN（如除零
+                        // 指标 FB_USED/(FB_USED+0)），不过滤会让 aggregate 的均值
+                        // 变成 NaN、峰值排序行为未定义。
+                        if !v.is_finite() {
+                            continue;
+                        }
                         if let Some(dt) = DateTime::<Utc>::from_timestamp(ts as i64, 0) {
                             points.push((dt, v));
                         }
@@ -175,11 +170,13 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
             }
             PromResult::Vector { metric, value } => {
                 if let Ok(v) = value.1.parse::<f64>() {
-                    if let Some(dt) = DateTime::<Utc>::from_timestamp(value.0 as i64, 0) {
-                        out.push(Series {
-                            labels: metric,
-                            points: vec![(dt, v)],
-                        });
+                    if v.is_finite() {
+                        if let Some(dt) = DateTime::<Utc>::from_timestamp(value.0 as i64, 0) {
+                            out.push(Series {
+                                labels: metric,
+                                points: vec![(dt, v)],
+                            });
+                        }
                     }
                 }
             }
@@ -191,6 +188,64 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
 /// 由 GPU 显存策略生成单条 PromQL（FB_USED/(FB_USED+FB_FREE)*100）。
 pub fn gpu_memory_promql(used: &str, free: &str) -> String {
     format!("{used} / ({used} + {free}) * 100")
+}
+
+/// 测试用 Mock fetcher：按 promql 子串匹配返回预设序列，或注入错误。
+///
+/// 设计：`responses` 是 (子串谓词, 返回值) 列表，按声明顺序首次命中即返回；
+/// 都不命中则返回空 `Ok`。这样编排测试可以针对不同指标（核心 vs 显存 vs
+/// fallback 的 used/total）返回不同序列，或对某条查询返回 `Err` 来验证
+/// C2（fetch 失败应转 Warning 而非静默 N/A）。
+#[cfg(test)]
+pub struct MockFetcher {
+    /// (promql 子串谓词, 返回结果)
+    pub responses: Vec<(String, Result<Vec<Series>, AppError>)>,
+}
+
+#[cfg(test)]
+impl Default for MockFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl MockFetcher {
+    pub fn new() -> Self {
+        Self {
+            responses: Vec::new(),
+        }
+    }
+    /// 注册：当 promql 含 `needle` 子串时返回 `res`。
+    pub fn when(mut self, needle: impl Into<String>, res: Result<Vec<Series>, AppError>) -> Self {
+        self.responses.push((needle.into(), res));
+        self
+    }
+    fn lookup(&self, promql: &str) -> Result<Vec<Series>, AppError> {
+        for (needle, res) in &self.responses {
+            if promql.contains(needle.as_str()) {
+                return res.clone();
+            }
+        }
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl MetricFetcher for MockFetcher {
+    async fn query_range(
+        &self,
+        promql: &str,
+        _start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+        _step: Duration,
+    ) -> Result<Vec<Series>, AppError> {
+        self.lookup(promql)
+    }
+    async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError> {
+        self.lookup(promql)
+    }
 }
 
 #[cfg(test)]
@@ -228,27 +283,33 @@ mod tests {
     #[test]
     fn gpu_memory_promql_format() {
         let q = gpu_memory_promql("DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE");
-        assert!(q.contains("DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 100"));
+        assert!(
+            q.contains("DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 100")
+        );
     }
 
-    /// Mock fetcher：返回预设序列，用于编排逻辑测试（不连真实 Prometheus）。
-    pub struct MockFetcher {
-        pub series: Vec<Series>,
-    }
-
-    #[async_trait]
-    impl MetricFetcher for MockFetcher {
-        async fn query_range(
-            &self,
-            _promql: &str,
-            _start: DateTime<Utc>,
-            _end: DateTime<Utc>,
-            _step: Duration,
-        ) -> Result<Vec<Series>, AppError> {
-            Ok(self.series.clone())
-        }
-        async fn query_instant(&self, _promql: &str) -> Result<Vec<Series>, AppError> {
-            Ok(self.series.clone())
-        }
+    #[test]
+    fn parse_response_drops_nan_and_inf() {
+        // I4：Prometheus 可能返回 "NaN"/"+Inf"/"-Inf"（如除零指标），应被丢弃，
+        // 否则 aggregate 的均值会变 NaN。
+        let resp = PromResponse {
+            status: "success".into(),
+            error: None,
+            data: Some(PromData {
+                result: vec![PromResult::Matrix {
+                    metric: HashMap::from([("gpu".into(), "0".into())]),
+                    values: vec![
+                        (1000.0, "50.0".into()),
+                        (1060.0, "NaN".into()),
+                        (1120.0, "+Inf".into()),
+                        (1180.0, "75.0".into()),
+                    ],
+                }],
+            }),
+        };
+        let s = parse_response(resp, "src").unwrap();
+        assert_eq!(s[0].points.len(), 2, "NaN/+Inf 应被过滤");
+        assert!((s[0].points[0].1 - 50.0).abs() < 1e-9);
+        assert!((s[0].points[1].1 - 75.0).abs() < 1e-9);
     }
 }

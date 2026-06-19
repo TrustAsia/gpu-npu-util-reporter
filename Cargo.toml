@@ -21,9 +21,7 @@ serde_yaml = "0.9"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
-anyhow = "1"
 csv = "1"
 calamine = "0.26"
 rust_xlsxwriter = "0.79"
-futures = "0.3"
 async-trait = "0.1"

@@ -32,12 +32,14 @@ fn renders_report_with_highlight_and_reads_back() {
         range_start: Utc.timestamp_opt(0, 0).unwrap(),
         range_end: Utc.timestamp_opt(2000, 0).unwrap(),
     };
-    let mut tr = ThresholdTriggers::default();
-    tr.core_avg_above = Some(TriggerConfig {
-        enabled: true,
-        threshold: 80.0,
-        color: HexColor("#FF0000".into()),
-    });
+    let tr = ThresholdTriggers {
+        core_avg_above: Some(TriggerConfig {
+            enabled: true,
+            threshold: 80.0,
+            color: HexColor("#FF0000".into()),
+        }),
+        ..Default::default()
+    };
     let spec = ReportSpec {
         base_columns: BASE_COLUMNS.iter().map(|s| s.to_string()).collect(),
         mapping_renames: vec![],

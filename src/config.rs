@@ -231,9 +231,8 @@ pub fn apply_overrides(mut cfg: AppConfig, ov: &CliOverrides) -> Result<AppConfi
 /// 校验时间字符串格式。
 fn validate_time(s: &str) -> Result<(), AppError> {
     use chrono::NaiveDateTime;
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").map_err(|_| AppError::TimeFormat {
-        raw: s.into(),
-    })?;
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .map_err(|_| AppError::TimeFormat { raw: s.into() })?;
     Ok(())
 }
 
