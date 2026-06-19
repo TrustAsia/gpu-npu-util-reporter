@@ -3,6 +3,14 @@ name = "gpu-util-monitor"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "gpu_util_monitor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gpu-util-monitor"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

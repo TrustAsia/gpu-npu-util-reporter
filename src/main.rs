@@ -3,22 +3,17 @@
 //! 编排流水线：config → fetcher → processor → mapper → highlight → reporter。
 //! 单源/单卡失败降级为 N/A，仅打印警告；致命错误打印中文提示并退出码 1。
 
-mod config;
-mod devices;
-mod error;
-mod fetcher;
-mod highlight;
-mod mapper;
-mod processor;
-mod reporter;
+use gpu_util_monitor::config;
+use gpu_util_monitor::devices::{DeviceSpec, MemoryStrategy};
+use gpu_util_monitor::error::AppError;
+use gpu_util_monitor::fetcher::{self, MetricFetcher, PrometheusFetcher};
+use gpu_util_monitor::mapper;
+use gpu_util_monitor::processor::{self, aggregate, CardRecord, Series};
+use gpu_util_monitor::reporter;
 
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use clap::Parser;
 use config::{AppConfig, CliOverrides};
-use devices::{DeviceSpec, MemoryStrategy};
-use error::AppError;
-use fetcher::{MetricFetcher, PrometheusFetcher};
-use processor::{aggregate, CardRecord, Series};
 use std::collections::HashMap;
 use std::process::ExitCode;
 

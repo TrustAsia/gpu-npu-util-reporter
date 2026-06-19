@@ -74,21 +74,21 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
     }
     let sum: f64 = points.iter().map(|(_, v)| *v).sum();
     let avg = sum / points.len() as f64;
-    // 取最大值；并列取最早时间戳（va 相同时 tb 越小越优先 → .then(tb.cmp(ta))）
-    let (peak_time, peak) = points
-        .iter()
-        .copied()
-        .max_by(|(ta, va), (tb, vb)| {
-            va.partial_cmp(vb)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(tb.cmp(ta))
-        })
-        .expect("非空序列必有最大值");
-    Some(MetricStats {
-        avg,
-        peak,
-        peak_time,
-    })
+    // 取最大值；并列取最早时间戳（va 相同时 tb 越小越优先 → .then(tb.cmp(ta))）。
+    // max_by 对非空迭代器必返回 Some；这里用 match 显式处理，避免 expect/panic。
+    let best = points.iter().copied().max_by(|(ta, va), (tb, vb)| {
+        va.partial_cmp(vb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(tb.cmp(ta))
+    });
+    match best {
+        Some((peak_time, peak)) => Some(MetricStats {
+            avg,
+            peak,
+            peak_time,
+        }),
+        None => None,
+    }
 }
 
 /// HBM fallback：当直接利用率指标为空时，用 used/total*100 重算显存占用率序列。
