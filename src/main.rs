@@ -2,6 +2,7 @@
 mod config;
 mod devices;
 mod error;
+mod fetcher;
 mod highlight;
 mod mapper;
 mod processor;
