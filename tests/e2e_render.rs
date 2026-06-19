@@ -6,10 +6,10 @@
 
 use chrono::TimeZone;
 use chrono::Utc;
-use gpu_util_monitor::highlight::{HexColor, ThresholdTriggers, TriggerConfig};
-use gpu_util_monitor::mapper::BASE_COLUMNS;
-use gpu_util_monitor::processor::CardRecord;
-use gpu_util_monitor::reporter::{render_to_buffer, ReportSpec};
+use gpu_npu_util_reporter::highlight::{HexColor, ThresholdTriggers, TriggerConfig};
+use gpu_npu_util_reporter::mapper::BASE_COLUMNS;
+use gpu_npu_util_reporter::processor::CardRecord;
+use gpu_npu_util_reporter::reporter::{render_to_buffer, ReportSpec};
 use std::collections::HashMap;
 
 #[test]

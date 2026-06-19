@@ -471,7 +471,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpu-util-monitor"
+name = "gpu-npu-util-reporter"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -3,13 +3,13 @@
 //! 编排流水线：config → fetcher → processor → mapper → highlight → reporter。
 //! 单源/单卡失败降级为 N/A，仅打印警告；致命错误打印中文提示并退出码 1。
 
-use gpu_util_monitor::config;
-use gpu_util_monitor::devices::{DeviceSpec, MemoryStrategy};
-use gpu_util_monitor::error::AppError;
-use gpu_util_monitor::fetcher::{self, MetricFetcher, PrometheusFetcher};
-use gpu_util_monitor::mapper;
-use gpu_util_monitor::processor::{self, aggregate, CardRecord, Series};
-use gpu_util_monitor::reporter;
+use gpu_npu_util_reporter::config;
+use gpu_npu_util_reporter::devices::{DeviceSpec, MemoryStrategy};
+use gpu_npu_util_reporter::error::AppError;
+use gpu_npu_util_reporter::fetcher::{self, MetricFetcher, PrometheusFetcher};
+use gpu_npu_util_reporter::mapper;
+use gpu_npu_util_reporter::processor::{self, aggregate, CardRecord, Series};
+use gpu_npu_util_reporter::reporter;
 
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use clap::Parser;
@@ -19,7 +19,7 @@ use std::process::ExitCode;
 
 /// CLI 参数。
 #[derive(Parser, Debug)]
-#[command(name = "gpu-util-monitor", about = "GPU/NPU 利用率监控与报表生成")]
+#[command(name = "gpu-npu-util-reporter", about = "GPU/NPU 利用率监控与报表生成")]
 struct Args {
     /// 配置文件路径（不存在则生成默认并退出）。
     #[arg(long, default_value = "./config.yaml")]
