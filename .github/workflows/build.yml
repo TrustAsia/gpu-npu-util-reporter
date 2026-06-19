@@ -20,53 +20,48 @@ jobs:
           - target: x86_64-apple-darwin
             os: ubuntu-latest
             suffix: ""
-            use-docker: true
-            docker-image: joseluisq/rust-linux-darwin-builder:1.89.0-amd64
+            use-zigbuild: true
           - target: aarch64-apple-darwin
             os: ubuntu-latest
             suffix: ""
-            use-docker: true
-            docker-image: joseluisq/rust-linux-darwin-builder:1.89.0-arm64
+            use-zigbuild: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             suffix: .exe
-            use-docker: false
-            docker-image: ""
+            use-zigbuild: false
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             suffix: ""
-            use-docker: false
-            docker-image: ""
+            use-zigbuild: false
 
     steps:
       - uses: actions/checkout@v4
 
-      # ---- Docker 交叉编译（darwin 目标在 Linux 上编译）----
-      - name: Build in Docker
-        if: matrix.use-docker
-        run: |
-          docker run --rm \
-            -v "${PWD}:/src" \
-            -w /src \
-            ${{ matrix.docker-image }} \
-            sh -c "cargo build --release --target ${{ matrix.target }}"
-
-      - name: Test in Docker
-        if: matrix.use-docker
-        run: |
-          docker run --rm \
-            -v "${PWD}:/src" \
-            -w /src \
-            ${{ matrix.docker-image }} \
-            sh -c "cargo test --target ${{ matrix.target }}"
-
-      # ---- 原生编译（Windows / Linux）----
       - name: Install Rust toolchain
-        if: ${{ !matrix.use-docker }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
+      # ---- zigbuild 交叉编译（darwin 目标在 Linux 上编译）----
+      - name: Install Zig
+        if: matrix.use-zigbuild
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: "0.13.0"
+
+      - name: Install cargo-zigbuild
+        if: matrix.use-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Build with zigbuild
+        if: matrix.use-zigbuild
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Test with zigbuild
+        if: matrix.use-zigbuild
+        run: cargo test --target ${{ matrix.target }}
+
+      # ---- Linux musl: 安装 musl-tools + 静态链接 ----
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -76,11 +71,11 @@ jobs:
         run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
 
       - name: Build
-        if: ${{ !matrix.use-docker }}
+        if: ${{ !matrix.use-zigbuild }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
-        if: ${{ !matrix.use-docker }}
+        if: ${{ !matrix.use-zigbuild }}
         run: cargo test --target ${{ matrix.target }}
 
       - name: Upload artifact
