@@ -202,7 +202,7 @@ pub async fn collect_device(
 
         // 归属
         let (namespace, pod, container) =
-            ownership_for(&mut ctx, mode, &card_id, core.as_ref()).await;
+            ownership_for(&mut ctx, mode, &card_id, core.as_ref(), mem.as_ref()).await;
 
         ctx.out.records.push(CardRecord {
             source_name: source_name.into(),
@@ -227,8 +227,9 @@ pub async fn collect_device(
 }
 
 /// 把一条 series 合并进 `Option<Series>` 槽位：空则初始化；非空则把新点追加
-/// 到既有 series 的 points 末尾，并保留首个 series 的标签（身份标签已由 join key
-/// 对齐，归属标签的取值由 `ownership_for` 单独处理）。
+/// 到既有 series 的 points 末尾，并按时间戳排序去重，保证聚合结果正确。
+/// 保留首个 series 的标签（身份标签已由 join key 对齐，归属标签的取值由
+/// `ownership_for` 单独处理）。
 ///
 /// 这避免了 Pod 漂移场景下多条 series 共享同一 (`ip`, `card_id`) 时后者覆写前者、
 /// 导致聚合丢点的问题。
@@ -236,6 +237,8 @@ fn merge_into(slot: &mut Option<Series>, incoming: Series) {
     match slot {
         Some(existing) => {
             existing.points.extend(incoming.points);
+            existing.points.sort_by_key(|(ts, _)| *ts);
+            existing.points.dedup_by_key(|(ts, _)| *ts);
         }
         None => *slot = Some(incoming),
     }
@@ -302,9 +305,12 @@ async fn ownership_for(
     mode: OwnershipMode,
     card_id: &str,
     core: Option<&Series>,
+    mem: Option<&Series>,
 ) -> (String, String, String) {
     if mode == OwnershipMode::Instant {
-        let labels = core.map(|c| &c.labels);
+        let labels = core
+            .map(|c| &c.labels)
+            .or_else(|| mem.map(|m| &m.labels));
         let get =
             |k: &str| -> String { labels.and_then(|m| m.get(k)).cloned().unwrap_or_default() };
         return (

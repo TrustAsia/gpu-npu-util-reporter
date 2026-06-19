@@ -124,8 +124,9 @@ async fn main() -> ExitCode {
         if m.enabled {
             match mapper::load_asset_table(&m.source_path, &m.match_keys) {
                 Ok(assets) => {
+                    let index = mapper::build_asset_index(&assets);
                     for (i, rec) in records.iter().enumerate() {
-                        let joined = mapper::join_record(rec, &assets, m);
+                        let joined = mapper::join_record(rec, &index, m);
                         for (rename, val) in joined {
                             mapping_values.insert((i, rename), val);
                         }

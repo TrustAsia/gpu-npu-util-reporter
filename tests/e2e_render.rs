@@ -37,7 +37,7 @@ fn renders_report_with_highlight_and_reads_back() {
         core_avg_above: Some(TriggerConfig {
             enabled: true,
             threshold: 80.0,
-            color: HexColor("#FF0000".into()),
+            color: HexColor::parse("#FF0000", "test").unwrap(),
         }),
         ..Default::default()
     };

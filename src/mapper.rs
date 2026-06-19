@@ -287,24 +287,37 @@ fn load_xlsx(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppEr
     Ok(rows)
 }
 
+/// 资产表索引：`@key` → 资产行。由 [`build_asset_index`] 构建，供 [`join_record`] 做 O(1) 查找。
+type AssetIndex = HashMap<String, AssetRow>;
+
+/// 从资产行列表构建 `@key` 索引，供 `join_record` 做 O(1) 查找。
+/// 同一 `@key` 出现多次时取首行（与原线性扫描行为一致）。
+#[must_use]
+pub fn build_asset_index(assets: &[AssetRow]) -> AssetIndex {
+    let mut idx = HashMap::with_capacity(assets.len());
+    for row in assets {
+        if let Some(key) = row.get("@key") {
+            idx.entry(key.clone()).or_insert_with(|| row.clone());
+        }
+    }
+    idx
+}
+
 /// 对一行 `CardRecord` 做 join，返回 (rename → value)。
 /// 未命中返回空 map（调用方记 Warning）。
 #[must_use]
 pub fn join_record(
     rec: &CardRecord,
-    assets: &[AssetRow],
+    index: &AssetIndex,
     cfg: &MappingConfig,
 ) -> HashMap<String, String> {
     let key = join_key(rec, &cfg.match_keys);
     let mut out = HashMap::new();
-    for row in assets {
-        if row.get("@key").map(String::as_str) == Some(key.as_str()) {
-            for col in &cfg.columns {
-                if let Some(v) = row.get(&col.source_field) {
-                    out.insert(col.rename.clone(), v.clone());
-                }
+    if let Some(row) = index.get(&key) {
+        for col in &cfg.columns {
+            if let Some(v) = row.get(&col.source_field) {
+                out.insert(col.rename.clone(), v.clone());
             }
-            return out;
         }
     }
     out
@@ -403,11 +416,12 @@ mod tests {
         a1.insert("机房".into(), "北京A".into());
         inject_key(&mut a1, &cfg.match_keys);
         let assets = vec![a1];
+        let index = build_asset_index(&assets);
 
-        let hit = join_record(&rec("1.1.1.1", "0"), &assets, &cfg);
+        let hit = join_record(&rec("1.1.1.1", "0"), &index, &cfg);
         assert_eq!(hit.get("机房").unwrap(), "北京A");
 
-        let miss = join_record(&rec("2.2.2.2", "0"), &assets, &cfg);
+        let miss = join_record(&rec("2.2.2.2", "0"), &index, &cfg);
         assert!(miss.is_empty());
     }
 

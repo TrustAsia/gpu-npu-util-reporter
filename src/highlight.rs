@@ -15,8 +15,12 @@ pub const COL_MEM_AVG: &str = "显存占用率平均值";
 pub const COL_MEM_PEAK: &str = "显存占用率峰值";
 
 /// HEX 颜色包装类型，反序列化时校验合法性（`#RRGGBB` 或 `#RGB`）。
+///
+/// 内部始终存储为 `#RRGGBB`（7 字符大写）——短格式 `#RGB` 在 `parse` 阶段
+/// 自动展开为 `#RRGGBB`，保证下游消费方（如 reporter 的 `u32::from_str_radix`）
+/// 无需关心短格式。
 #[derive(Debug, Clone, PartialEq)]
-pub struct HexColor(pub String);
+pub struct HexColor(String);
 
 impl HexColor {
     /// 校验并构造；非法返回 [`AppError::InvalidColor`]。
@@ -27,18 +31,32 @@ impl HexColor {
     /// 返回 [`AppError::InvalidColor`] 当颜色不是合法 HEX 格式。
     #[must_use = "parsing a hex color always returns a Result that should be checked"]
     pub fn parse(raw: &str, trigger: &str) -> Result<Self, AppError> {
-        let s = raw.trim();
-        let valid = s.starts_with('#')
-            && (s.len() == 7 || s.len() == 4)
-            && s[1..].chars().all(|c| c.is_ascii_hexdigit());
-        if valid {
-            Ok(HexColor(s.to_uppercase()))
+        let s = raw.trim().to_ascii_uppercase();
+        // #RGB → #RRGGBB：短格式自动展开，保证下游（如 reporter）只需处理 7 字符形式。
+        let expanded = if s.starts_with('#') && s.len() == 4 && s[1..].chars().all(|c| c.is_ascii_hexdigit()) {
+            format!("#{}{}{}{}{}{}", &s[1..2], &s[1..2], &s[2..3], &s[2..3], &s[3..4], &s[3..4])
+        } else {
+            s
+        };
+        if expanded.starts_with('#')
+            && expanded.len() == 7
+            && expanded[1..].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            Ok(Self(expanded))
         } else {
             Err(AppError::InvalidColor {
                 trigger: trigger.into(),
                 raw: raw.into(),
             })
         }
+    }
+}
+
+impl HexColor {
+    /// 返回内部 HEX 颜色字符串（保证为 `#RRGGBB` 7 字符大写格式）。
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.0
     }
 }
 
@@ -208,6 +226,15 @@ mod tests {
     }
 
     #[test]
+    fn hexcolor_expands_rgb_short_form() {
+        // #RGB → #RRGGBB：短格式自动展开，保证下游消费方只需处理 7 字符形式。
+        let c = HexColor::parse("#F00", "t").unwrap();
+        assert_eq!(c.value(), "#FF0000");
+        let c = HexColor::parse("#0aB", "t").unwrap();
+        assert_eq!(c.value(), "#00AABB");
+    }
+
+    #[test]
     fn hexcolor_rejects_invalid() {
         assert!(HexColor::parse("red", "t").is_err());
         assert!(HexColor::parse("#GGG", "t").is_err());
@@ -226,7 +253,7 @@ mod tests {
         let hits = tr.evaluate_row(&r);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].column, COL_CORE_AVG);
-        assert_eq!(hits[0].color.0, "#FF0000");
+        assert_eq!(hits[0].color.value(), "#FF0000");
     }
 
     #[test]
@@ -286,7 +313,7 @@ mod tests {
         };
         let hits = tr.evaluate_row(&r);
         assert_eq!(hits.len(), 1, "同列只产生一个命中");
-        assert_eq!(hits[0].color.0, "#FF0000");
+        assert_eq!(hits[0].color.value(), "#FF0000");
     }
 
     #[test]
