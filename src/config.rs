@@ -7,6 +7,7 @@ use crate::devices::{ascend_910b_spec, nvidia_a10_spec, DeviceSpec};
 use crate::error::AppError;
 use crate::highlight::ThresholdTriggers;
 use crate::mapper::MappingConfig;
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -218,6 +219,17 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             reason: "report.query_step_secs 必须 > 0".into(),
         });
     }
+    // 校验时间范围逻辑：start 必须早于 end，否则 Prometheus 返回空数据。
+    let start = NaiveDateTime::parse_from_str(&cfg.time_range.start, "%Y-%m-%d %H:%M:%S");
+    let end = NaiveDateTime::parse_from_str(&cfg.time_range.end, "%Y-%m-%d %H:%M:%S");
+    if let (Ok(s), Ok(e)) = (start, end) {
+        if s >= e {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: "time_range.start 必须早于 time_range.end".into(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -313,5 +325,19 @@ mod tests {
         let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.report.query_step_secs = 0;
         assert!(validate_config(&cfg, "test.yaml").is_err());
+    }
+
+    #[test]
+    fn config_rejects_start_ge_end() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.time_range.start = "2026-06-19 00:00:00".into();
+        cfg.time_range.end = "2026-06-18 00:00:00".into();
+        assert!(validate_config(&cfg, "test.yaml").is_err());
+    }
+
+    #[test]
+    fn config_accepts_valid_time_range() {
+        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        assert!(validate_config(&cfg, "test.yaml").is_ok());
     }
 }
