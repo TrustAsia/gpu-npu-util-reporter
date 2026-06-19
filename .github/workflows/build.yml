@@ -10,74 +10,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-native:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            os: ubuntu-latest
-            suffix: ""
-            use-cross: true
-            cross-image: x86_64-apple-darwin-cross
-          - target: aarch64-apple-darwin
-            os: ubuntu-latest
-            suffix: ""
-            use-cross: true
-            cross-image: aarch64-apple-darwin-cross
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             suffix: .exe
-            use-cross: false
-            cross-image: ""
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             suffix: ""
-            use-cross: false
-            cross-image: ""
 
     steps:
       - uses: actions/checkout@v4
 
-      # ---- cross 交叉编译 darwin 目标 ----
-      - name: Install nightly Rust toolchain
-        if: matrix.use-cross
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Checkout cross-toolchains
-        if: matrix.use-cross
-        uses: actions/checkout@v4
-        with:
-          repository: cross-rs/cross-toolchains
-          path: cross-toolchains
-
-      - name: Install cross
-        if: matrix.use-cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Build cross Docker image with macOS SDK
-        if: matrix.use-cross
-        working-directory: cross-toolchains
-        run: |
-          cargo install cross --git https://github.com/cross-rs/cross --force
-          cargo build-docker-image ${{ matrix.cross-image }} \
-            --build-arg "MACOS_SDK_URL=https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz"
-
-      - name: Build with cross
-        if: matrix.use-cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Test with cross
-        if: matrix.use-cross
-        run: cross test --target ${{ matrix.target }}
-
-      # ---- 原生编译（Windows / Linux）----
       - name: Install Rust toolchain
-        if: ${{ !matrix.use-cross }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -91,11 +41,9 @@ jobs:
         run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
 
       - name: Build
-        if: ${{ !matrix.use-cross }}
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Run tests
-        if: ${{ !matrix.use-cross }}
+      - name: Test
         run: cargo test --target ${{ matrix.target }}
 
       - name: Upload artifact
@@ -103,4 +51,55 @@ jobs:
         with:
           name: gpu-npu-util-reporter-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/gpu-npu-util-reporter${{ matrix.suffix }}
+          if-no-files-found: error
+
+  build-darwin:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            cross-image: x86_64-apple-darwin-cross
+          - target: aarch64-apple-darwin
+            cross-image: aarch64-apple-darwin-cross
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchains
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install nightly toolchain (build-std)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Checkout cross-toolchains
+        uses: actions/checkout@v4
+        with:
+          repository: cross-rs/cross-toolchains
+          path: cross-toolchains
+
+      - name: Install cross and build Docker image
+        working-directory: cross-toolchains
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+          cargo build-docker-image ${{ matrix.cross-image }} \
+            --build-arg "MACOS_SDK_URL=https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz"
+
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Test
+        run: cross test --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-npu-util-reporter-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/gpu-npu-util-reporter
           if-no-files-found: error
