@@ -2,7 +2,7 @@
 build-std = true
 
 [target.x86_64-apple-darwin]
-image = "x86_64-apple-darwin-cross:local"
+image = "ghcr.io/cross-rs/x86_64-apple-darwin-cross:local"
 
 [target.aarch64-apple-darwin]
-image = "aarch64-apple-darwin-cross:local"
+image = "ghcr.io/cross-rs/aarch64-apple-darwin-cross:local"
