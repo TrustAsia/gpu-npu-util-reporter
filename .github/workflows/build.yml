@@ -1,0 +1,71 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+            suffix: ""
+          - target: x86_64-pc-windows-gnullvm
+            os: windows-latest
+            suffix: .exe
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            suffix: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ---- Windows gnullvm: 安装 LLVM + 配置 linker ----
+      - name: Install LLVM (gnullvm)
+        if: matrix.target == 'x86_64-pc-windows-gnullvm'
+        run: |
+          choco install llvm -y --no-progress
+
+      - name: Configure gnullvm linker
+        if: matrix.target == 'x86_64-pc-windows-gnullvm'
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          printf '[target.x86_64-pc-windows-gnullvm]\nlinker = "rust-lld"\n' >> .cargo/config.toml
+
+      # ---- Linux musl: 安装 musl-tools + 静态链接 ----
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Set musl static linking
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-npu-util-reporter-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/gpu-npu-util-reporter${{ matrix.suffix }}
+          if-no-files-found: error
