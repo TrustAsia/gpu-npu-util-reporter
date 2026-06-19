@@ -1,5 +1,0 @@
-[target.x86_64-apple-darwin]
-image = "joseluisq/rust-linux-darwin-builder:x86_64"
-
-[target.aarch64-apple-darwin]
-image = "joseluisq/rust-linux-darwin-builder:aarch64"

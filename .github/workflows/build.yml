@@ -20,44 +20,53 @@ jobs:
           - target: x86_64-apple-darwin
             os: ubuntu-latest
             suffix: ""
-            use-cross: true
+            use-docker: true
+            docker-image: joseluisq/rust-linux-darwin-builder:1.89.0-amd64
           - target: aarch64-apple-darwin
             os: ubuntu-latest
             suffix: ""
-            use-cross: true
+            use-docker: true
+            docker-image: joseluisq/rust-linux-darwin-builder:1.89.0-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             suffix: .exe
-            use-cross: false
+            use-docker: false
+            docker-image: ""
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             suffix: ""
-            use-cross: false
+            use-docker: false
+            docker-image: ""
 
     steps:
       - uses: actions/checkout@v4
 
+      # ---- Docker 交叉编译（darwin 目标在 Linux 上编译）----
+      - name: Build in Docker
+        if: matrix.use-docker
+        run: |
+          docker run --rm \
+            -v "${PWD}:/src" \
+            -w /src \
+            ${{ matrix.docker-image }} \
+            sh -c "cargo build --release --target ${{ matrix.target }}"
+
+      - name: Test in Docker
+        if: matrix.use-docker
+        run: |
+          docker run --rm \
+            -v "${PWD}:/src" \
+            -w /src \
+            ${{ matrix.docker-image }} \
+            sh -c "cargo test --target ${{ matrix.target }}"
+
+      # ---- 原生编译（Windows / Linux）----
       - name: Install Rust toolchain
+        if: ${{ !matrix.use-docker }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # ---- cross 交叉编译（darwin 目标在 Linux 上编译）----
-      - name: Install cross
-        if: matrix.use-cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Build with cross
-        if: matrix.use-cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Test with cross
-        if: matrix.use-cross
-        run: cross test --target ${{ matrix.target }}
-
-      # ---- Linux musl: 安装 musl-tools + 静态链接 ----
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -67,11 +76,11 @@ jobs:
         run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
 
       - name: Build
-        if: ${{ !matrix.use-cross }}
+        if: ${{ !matrix.use-docker }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
-        if: ${{ !matrix.use-cross }}
+        if: ${{ !matrix.use-docker }}
         run: cargo test --target ${{ matrix.target }}
 
       - name: Upload artifact
