@@ -31,7 +31,7 @@
 | D2 | 主机 IP 来源 | 可配置标签优先，`instance` 标签去端口兜底 |
 | D3 | device_type 语义 | 可扩展的"指标配方"——每个设备类型是一组 (核心利用率指标, 显存查询, 卡编号标签) |
 | D4 | 跨源去重 | 不去重，按数据源分行 |
-| D5 | 映射列位置 | 锚点列 + before/after 方向 |
+| D5 | 映射列位置 | 锚点列 + before/after 方向；锚点必须为基础列（不可锚定到其它映射列） |
 | D6 | 阈值染色粒度 | 只染命中触发器的单个单元格；每个触发器独立配 HEX 颜色；默认全关 |
 
 ## 3. 总体架构
@@ -243,15 +243,17 @@ struct MappingColumn {
     position: InsertPosition,
 }
 
-enum InsertPosition { Before(String), After(String) }
+enum InsertPosition { direction: Direction, anchor: String }   // 对象 { direction: before|after, anchor }
+enum Direction { Before, After }
 enum MatchKey { HostIp, CardId, NodeName } // 可扩展
 ```
 
 **列位置排布算法**：
 1. reporter 先定义基础列的有序列表 `base_columns`。
 2. mapper 把每个 `MappingColumn.position` 解析成目标 index：`Before(X)` → X 的 index；`After(X)` → X 的 index + 1。
-3. 按 index 升序插入映射列；同 index 的按 config 顺序稳定排列。
-4. 若锚点列名不存在，记 Warning 并把该列追加到末尾。
+3. **锚点约束**：位置锚点（X）**必须是基础列之一**，不允许以其它映射列作为锚点。这让每个映射列的目标 index 由基础列布局唯一确定，互不影响，无需关心映射列之间的相对顺序或链式依赖。
+4. 按 index 升序插入映射列；同 index 的按 config 顺序稳定排列（同 index 的多列在该位置依次堆叠，后插入者排在该 index 偏后位置）。
+5. 若锚点列名不在基础列中，记 Warning 并把该映射列追加到所有列末尾。
 
 **Join 逻辑**：把资产表读成 `HashMap<join_key_string, HashMap<field, value>>`，key 由 match_keys 拼成（如 `"10.0.0.1|0"`）。每行 CardRecord 用同样的 key 查；命中则注入，未命中则该列留空 + 可选 Warning。
 
@@ -415,10 +417,10 @@ mapping:
   columns:
     - source_field: "机房位置"
       rename: "机房"
-      position: { after: "主机IP" }
+      position: { direction: after, anchor: "主机IP" }
     - source_field: "负责人"
       rename: "负责人"
-      position: { after: "机房" }
+      position: { direction: after, anchor: "主机IP" }   # 锚点必须是基础列，不能锚定到上面的映射列"机房"
 
 # === 阈值染色触发器（8 个，默认全部关闭；enabled: true 才生效） ===
 # 阈值为 0–100 的数值（与利用率原始范围一致）；color 必须是 HEX 格式（如 #RRGGBB）

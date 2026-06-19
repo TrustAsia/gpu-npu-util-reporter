@@ -1085,12 +1085,41 @@ pub const BASE_COLUMNS: &[&str] = &[
 ];
 
 /// 列插入位置：相对于某锚点列的前/后。
+///
+/// serde 表示为对象 `{ direction: before|after, anchor: <列名> }`，而非外部标记枚举
+/// ——serde_yaml 不支持默认的 externally-tagged 变体（会报
+/// `expected a YAML tag starting with '!'`）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum InsertPosition {
-    /// 锚点列之前。
-    Before(String),
-    /// 锚点列之后。
-    After(String),
+pub struct InsertPosition {
+    /// 方向：`before` 或 `after`。
+    pub direction: Direction,
+    /// 锚点列名（必须为基础列）。
+    pub anchor: String,
+}
+
+/// 插入方向。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Before,
+    After,
+}
+
+impl InsertPosition {
+    /// 便捷构造：锚点列之前。
+    pub fn before(anchor: impl Into<String>) -> Self {
+        InsertPosition {
+            direction: Direction::Before,
+            anchor: anchor.into(),
+        }
+    }
+    /// 便捷构造：锚点列之后。
+    pub fn after(anchor: impl Into<String>) -> Self {
+        InsertPosition {
+            direction: Direction::After,
+            anchor: anchor.into(),
+        }
+    }
 }
 
 /// 单个映射列的配置。
@@ -1160,25 +1189,25 @@ fn join_key(rec: &CardRecord, keys: &[MatchKey]) -> String {
 /// 计算最终列顺序：基础列 + 按 position 插入的映射列。
 ///
 /// 算法：每个 MappingColumn 解析出目标 index（Before(X)→X 的 index，
-/// After(X)→X 的 index + 1），按 index 升序、同 index 按 config 顺序稳定插入。
-/// 锚点不存在时该列追加到末尾。
+/// After(X)→X 的 index + 1）。**位置锚点 X 必须是基础列之一**（PRD §2.3
+/// 锚点约束）——不允许以其它映射列为锚点。因此所有目标 index 由基础列布局
+/// 唯一确定、互不影响，一次性计算即可。按 index 升序、同 index 按 config
+/// 顺序从后往前插入到 `result`（保持同 index 列按配置顺序堆叠）。
+/// 锚点不在基础列中时该列追加到末尾。
 pub fn compute_column_order(
     base: &[&str],
     mapping_cols: &[MappingColumn],
 ) -> Vec<String> {
     let mut result: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+    // 目标 index 仅取决于基础列（锚点被约束为基础列），互不影响
     let mut placements: Vec<(usize, String)> = mapping_cols
         .iter()
         .map(|c| {
-            let anchor = match &c.position {
-                InsertPosition::Before(a) => a,
-                InsertPosition::After(a) => a,
-            };
-            match result.iter().position(|x| x == anchor) {
+            match base.iter().position(|x| *x == c.position.anchor) {
                 Some(idx) => {
-                    let target = match c.position {
-                        InsertPosition::Before(_) => idx,
-                        InsertPosition::After(_) => idx + 1,
+                    let target = match c.position.direction {
+                        Direction::Before => idx,
+                        Direction::After => idx + 1,
                     };
                     (target, c.rename.clone())
                 }
@@ -1186,7 +1215,7 @@ pub fn compute_column_order(
             }
         })
         .collect();
-    // 稳定排序后从后往前插入，避免 index 漂移
+    // 稳定排序后从后往前插入：同 index 的多列按配置顺序堆叠
     placements.sort_by_key(|(idx, _)| *idx);
     for (target, rename) in placements.into_iter().rev() {
         let insert_at = target.min(result.len());
@@ -1338,16 +1367,18 @@ mod tests {
 
     #[test]
     fn column_order_inserts_after_anchor() {
+        // 两个映射列都锚定到同一基础列"主机IP"（PRD §2.3 锚点约束：锚点必须为基础列）。
+        // 同 index 的多列按配置顺序堆叠：机房在前、负责人在后。
         let cols = vec![
             MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
-                position: InsertPosition::After("主机IP".into()),
+                position: InsertPosition::after("主机IP"),
             },
             MappingColumn {
                 source_field: "负责人".into(),
                 rename: "负责人".into(),
-                position: InsertPosition::After("机房".into()),
+                position: InsertPosition::after("主机IP"),
             },
         ];
         let order = compute_column_order(BASE_COLUMNS, &cols);
@@ -1355,7 +1386,7 @@ mod tests {
         let room = order.iter().position(|s| s == "机房").unwrap();
         let owner = order.iter().position(|s| s == "负责人").unwrap();
         assert_eq!(room, ip + 1);
-        assert_eq!(owner, room + 1);
+        assert_eq!(owner, ip + 2);
     }
 
     #[test]
@@ -1363,7 +1394,7 @@ mod tests {
         let cols = vec![MappingColumn {
             source_field: "x".into(),
             rename: "X".into(),
-            position: InsertPosition::Before("设备类型".into()),
+            position: InsertPosition::before("设备类型"),
         }];
         let order = compute_column_order(BASE_COLUMNS, &cols);
         let x = order.iter().position(|s| s == "X").unwrap();
@@ -1376,7 +1407,7 @@ mod tests {
         let cols = vec![MappingColumn {
             source_field: "x".into(),
             rename: "X".into(),
-            position: InsertPosition::After("不存在".into()),
+            position: InsertPosition::after("不存在"),
         }];
         let order = compute_column_order(BASE_COLUMNS, &cols);
         assert_eq!(order.last().unwrap(), "X");
@@ -1391,7 +1422,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
-                position: InsertPosition::After("主机IP".into()),
+                position: InsertPosition::after("主机IP"),
             }],
         };
         let mut a1 = HashMap::new();
@@ -1410,7 +1441,7 @@ mod tests {
 }
 ```
 
-> 注意：`compute_column_order` 中多个映射列锚定到同一目标 index 时，"从后往前插入"会让同 index 的列按**配置顺序的逆序**出现。测试 `column_order_inserts_after_anchor` 验证的是链式锚定（机房锚主机IP、负责人锚机房），不触发该边界。若需要保证同 index 严格按配置顺序，可改为"按 (index, 配置序号) 排序后从前向后插入并对后续 index 偏移"——本任务采用从后往前插入，行为可预期且测试已锁定。
+> 注意：PRD §2.3 锚点约束要求位置锚点必须是基础列，不允许以映射列为锚点。因此所有目标 index 由基础列布局唯一确定、互不影响，一次性计算后从后往前插入即可。同 index（多列锚定到同一基础列）的列按配置顺序堆叠：从后往前插入时先放最后的列、最后放最前的列，使配置顺序在结果中保留。
 
 - [ ] **Step 2: `src/main.rs` 加 `mod mapper;`**
 
@@ -1586,7 +1617,7 @@ mapping:
   columns:
     - source_field: "机房位置"
       rename: "机房"
-      position: {{ after: "主机IP" }}
+      position: { direction: after, anchor: "主机IP" }
 
 # 阈值染色触发器（默认全为 null=未配置；启用时改为如下示例）
 #   core_avg_above:

@@ -33,12 +33,40 @@ pub const BASE_COLUMNS: &[&str] = &[
 ];
 
 /// 列插入位置：相对于某锚点列的前/后。
+///
+/// serde 表示为一个对象 `{ direction: before|after, anchor: <列名> }`，
+/// 而非外部标记枚举——因为 serde_yaml 不支持默认的 externally-tagged 变体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum InsertPosition {
-    /// 锚点列之前。
-    Before(String),
-    /// 锚点列之后。
-    After(String),
+pub struct InsertPosition {
+    /// 方向：`before` 或 `after`。
+    pub direction: Direction,
+    /// 锚点列名（必须为基础列）。
+    pub anchor: String,
+}
+
+/// 插入方向。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Before,
+    After,
+}
+
+impl InsertPosition {
+    /// 便捷构造：锚点列之前。
+    pub fn before(anchor: impl Into<String>) -> Self {
+        InsertPosition {
+            direction: Direction::Before,
+            anchor: anchor.into(),
+        }
+    }
+    /// 便捷构造：锚点列之后。
+    pub fn after(anchor: impl Into<String>) -> Self {
+        InsertPosition {
+            direction: Direction::After,
+            anchor: anchor.into(),
+        }
+    }
 }
 
 /// 单个映射列的配置。
@@ -107,29 +135,38 @@ fn join_key(rec: &CardRecord, keys: &[MatchKey]) -> String {
 
 /// 计算最终列顺序：基础列 + 按 position 插入的映射列。
 ///
-/// 算法：按配置顺序逐个插入映射列。每插入一列，后续列就能锚定到它
-/// （支持链式锚定，如 机房锚主机IP、负责人锚机房）。每列的目标位置由
-/// 当前 `result` 数组解析：Before(X)→X 的当前 index，After(X)→该 index + 1。
-/// 锚点不存在时该列追加到末尾。
+/// 算法：每个 MappingColumn 解析出目标 index（Before(X)→X 的 index，
+/// After(X)→X 的 index + 1）。**位置锚点 X 必须是基础列之一**（PRD §2.3
+/// 锚点约束）——不允许以其它映射列为锚点。因此所有目标 index 由基础列布局
+/// 唯一确定、互不影响，一次性计算即可。按 index 升序、同 index 按 config
+/// 顺序从后往前插入到 `result`（保持同 index 列按配置顺序堆叠）。
+/// 锚点不在基础列中时该列追加到末尾。
 pub fn compute_column_order(
     base: &[&str],
     mapping_cols: &[MappingColumn],
 ) -> Vec<String> {
     let mut result: Vec<String> = base.iter().map(|s| s.to_string()).collect();
-    for c in mapping_cols {
-        let anchor = match &c.position {
-            InsertPosition::Before(a) => a,
-            InsertPosition::After(a) => a,
-        };
-        let target = match result.iter().position(|x| x == anchor) {
-            Some(idx) => match c.position {
-                InsertPosition::Before(_) => idx,
-                InsertPosition::After(_) => idx + 1,
-            },
-            None => result.len(),
-        };
+    // 目标 index 仅取决于基础列（锚点被约束为基础列），互不影响
+    let mut placements: Vec<(usize, String)> = mapping_cols
+        .iter()
+        .map(|c| {
+            match base.iter().position(|x| *x == c.position.anchor) {
+                Some(idx) => {
+                    let target = match c.position.direction {
+                        Direction::Before => idx,
+                        Direction::After => idx + 1,
+                    };
+                    (target, c.rename.clone())
+                }
+                None => (result.len(), c.rename.clone()),
+            }
+        })
+        .collect();
+    // 稳定排序后从后往前插入：同 index 的多列按配置顺序堆叠
+    placements.sort_by_key(|(idx, _)| *idx);
+    for (target, rename) in placements.into_iter().rev() {
         let insert_at = target.min(result.len());
-        result.insert(insert_at, c.rename.clone());
+        result.insert(insert_at, rename);
     }
     result
 }
@@ -279,16 +316,18 @@ mod tests {
 
     #[test]
     fn column_order_inserts_after_anchor() {
+        // 两个映射列都锚定到同一基础列"主机IP"（PRD §2.3 锚点约束：锚点必须为基础列）。
+        // 同 index 的多列按配置顺序堆叠：机房在前、负责人在后。
         let cols = vec![
             MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
-                position: InsertPosition::After("主机IP".into()),
+                position: InsertPosition::after("主机IP"),
             },
             MappingColumn {
                 source_field: "负责人".into(),
                 rename: "负责人".into(),
-                position: InsertPosition::After("机房".into()),
+                position: InsertPosition::after("主机IP"),
             },
         ];
         let order = compute_column_order(BASE_COLUMNS, &cols);
@@ -296,7 +335,7 @@ mod tests {
         let room = order.iter().position(|s| s == "机房").unwrap();
         let owner = order.iter().position(|s| s == "负责人").unwrap();
         assert_eq!(room, ip + 1);
-        assert_eq!(owner, room + 1);
+        assert_eq!(owner, ip + 2);
     }
 
     #[test]
@@ -304,7 +343,7 @@ mod tests {
         let cols = vec![MappingColumn {
             source_field: "x".into(),
             rename: "X".into(),
-            position: InsertPosition::Before("设备类型".into()),
+            position: InsertPosition::before("设备类型"),
         }];
         let order = compute_column_order(BASE_COLUMNS, &cols);
         let x = order.iter().position(|s| s == "X").unwrap();
@@ -317,7 +356,7 @@ mod tests {
         let cols = vec![MappingColumn {
             source_field: "x".into(),
             rename: "X".into(),
-            position: InsertPosition::After("不存在".into()),
+            position: InsertPosition::after("不存在"),
         }];
         let order = compute_column_order(BASE_COLUMNS, &cols);
         assert_eq!(order.last().unwrap(), "X");
@@ -332,7 +371,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
-                position: InsertPosition::After("主机IP".into()),
+                position: InsertPosition::after("主机IP"),
             }],
         };
         let mut a1 = HashMap::new();
