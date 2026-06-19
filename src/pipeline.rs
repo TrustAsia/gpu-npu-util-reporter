@@ -280,10 +280,13 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
     let total_s = fetch_with_warning(ctx, total_metric).await;
 
     // total 按 join key 索引，避免 O(n*m) 全表扫且避开 `__name__` 干扰。
-    let total_by_key: HashMap<String, Series> = total_s
-        .into_iter()
-        .map(|t| (series_key(&t, ctx.spec, ctx.cfg), t))
-        .collect();
+    // 同一 key 的多条 total series 需要合并（如 Pod 漂移产出不同标签的 series），
+    // 否则 HashMap::collect 会静默丢弃非末尾的 series，导致数据丢失。
+    let mut total_by_key: HashMap<String, Option<Series>> = HashMap::new();
+    for t in total_s {
+        let key = series_key(&t, ctx.spec, ctx.cfg);
+        merge_into(total_by_key.entry(key).or_default(), t);
+    }
 
     used_s
         .into_iter()
@@ -291,6 +294,7 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
             let key = series_key(&u, ctx.spec, ctx.cfg);
             total_by_key
                 .get(&key)
+                .and_then(|opt| opt.as_ref())
                 .map(|t| processor::hbm_fallback_series(&u, t))
         })
         .collect()
@@ -350,11 +354,37 @@ async fn ownership_for(
         .query_range(&promql, ctx.start, ctx.end, ctx.step)
         .await
     {
-        Ok(series) => {
+        Ok(series) if !series.is_empty() => {
             let ns = last_label_value(&series, &ctx.spec.labels.namespace);
             let pod = last_label_value(&series, &ctx.spec.labels.pod);
             let ct = last_label_value(&series, &ctx.spec.labels.container);
             (ns, pod, ct)
+        }
+        Ok(_) => {
+            // 核心指标无数据（如该卡只有显存数据），回退到显存指标查询归属
+            if let Some(mem_metric) = ctx.spec.memory.first_metric_name() {
+                let mem_promql = format!(
+                    "{metric}{{{a}=\"{v}\"}}",
+                    metric = mem_metric,
+                    a = ctx.spec.card_id_label,
+                    v = escaped
+                );
+                match ctx
+                    .fetcher
+                    .query_range(&mem_promql, ctx.start, ctx.end, ctx.step)
+                    .await
+                {
+                    Ok(mem_series) if !mem_series.is_empty() => {
+                        let ns = last_label_value(&mem_series, &ctx.spec.labels.namespace);
+                        let pod = last_label_value(&mem_series, &ctx.spec.labels.pod);
+                        let ct = last_label_value(&mem_series, &ctx.spec.labels.container);
+                        (ns, pod, ct)
+                    }
+                    _ => (String::new(), String::new(), String::new()),
+                }
+            } else {
+                (String::new(), String::new(), String::new())
+            }
         }
         Err(e) => {
             ctx.out.push_warning(format!("{e}"));
@@ -781,6 +811,50 @@ mod tests {
         .await;
         let r = &out.records[0];
         assert_eq!(r.namespace, "ns-mem", "core 无归属时应从 mem 取 namespace");
+        assert_eq!(r.pod, "pod-mem");
+        assert_eq!(r.container, "c-mem");
+    }
+
+    // ---- last_in_range 模式：核心无数据时回退到显存指标查归属 ----
+
+    #[tokio::test]
+    async fn last_in_range_falls_back_to_memory_metric_for_ownership() {
+        // 核心指标查询返回空（模拟该卡只有显存数据），显存指标有归属标签。
+        // last_in_range 应回退到显存指标查询归属。
+        //
+        // Mock 匹配规则：按子串首次命中。GPU 显存的 composite PromQL 含 " / ("，
+        // 所以下面 when(" / (", ...) 只匹配那个复合查询；而归属回退查询的是
+        // 单独的 used 指标名 DCGM_FI_DEV_FB_USED{gpu="0"}，需要单独注册。
+        let mem_series = vec![Series {
+            labels: labels(&[
+                ("gpu", "0"),
+                ("ip", "1.1.1.1"),
+                ("namespace", "ns-mem"),
+                ("pod", "pod-mem"),
+                ("container", "c-mem"),
+            ]),
+            points: vec![(t(0), 20.0), (t(60), 30.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(vec![])) // 核心无数据
+            .when(" / (", Ok(mem_series.clone()))      // 显存复合查询
+            .when("DCGM_FI_DEV_FB_USED", Ok(mem_series)); // 归属回退查询 used 指标
+        let spec = crate::devices::nvidia_a10_spec();
+        let cfg = cfg_with_mode("last_in_range");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        // 只有显存的卡应产出记录，归属来自显存指标回退查询
+        assert_eq!(out.records.len(), 1, "应有 1 张只有显存的卡");
+        let r = &out.records[0];
+        assert_eq!(r.namespace, "ns-mem", "last_in_range 应从显存指标取归属");
         assert_eq!(r.pod, "pod-mem");
         assert_eq!(r.container, "c-mem");
     }

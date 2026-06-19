@@ -244,6 +244,18 @@ pub fn apply_overrides(mut cfg: AppConfig, ov: &CliOverrides) -> Result<AppConfi
         (Some(s), Some(e)) => {
             validate_time(s)?;
             validate_time(e)?;
+            // CLI 覆盖也需校验 start < end（配置文件的校验在 load_or_init 里，
+            // 但 CLI 覆盖发生在之后，如果不重新校验会绕过约束）。
+            let st = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S");
+            let en = NaiveDateTime::parse_from_str(e, "%Y-%m-%d %H:%M:%S");
+            if let (Ok(st), Ok(en)) = (st, en) {
+                if st >= en {
+                    return Err(AppError::Config {
+                        path: "<cli>".into(),
+                        reason: "--start 必须早于 --end".into(),
+                    });
+                }
+            }
             cfg.time_range.start.clone_from(s);
             cfg.time_range.end.clone_from(e);
         }
@@ -339,5 +351,20 @@ mod tests {
     fn config_accepts_valid_time_range() {
         let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         assert!(validate_config(&cfg, "test.yaml").is_ok());
+    }
+
+    #[test]
+    fn apply_overrides_rejects_start_ge_end() {
+        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let r = apply_overrides(
+            cfg,
+            &CliOverrides {
+                start: Some("2026-06-19 00:00:00".into()),
+                end: Some("2026-06-18 00:00:00".into()),
+                config_path: None,
+                output: None,
+            },
+        );
+        assert!(r.is_err(), "start >= end 应被拒绝");
     }
 }

@@ -107,7 +107,22 @@ impl MemoryStrategy {
     }
 }
 
-/// 一个设备类型的完整"指标配方"。
+impl MemoryStrategy {
+    /// 返回首个可用的指标名，供归属查询回退使用（当核心指标无数据时，
+    /// 用显存指标查询归属标签）。
+    ///
+    /// - `CompositeRatio`: 返回 `used` 指标名
+    /// - `DirectMetric`: 返回 `metric` 指标名
+    /// - `CompositeFromTotal`: 返回 `used` 指标名
+    #[must_use]
+    pub fn first_metric_name(&self) -> Option<&str> {
+        match self {
+            Self::CompositeRatio(b) => Some(&b.composite_ratio.used),
+            Self::DirectMetric(b) => Some(&b.direct_metric.metric),
+            Self::CompositeFromTotal(b) => Some(&b.composite_from_total.used),
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceSpec {
     /// 报表"设备类型"列显示名，如 "NVIDIA A10"。
