@@ -21,6 +21,11 @@ pub struct HexColor(pub String);
 impl HexColor {
     /// 校验并构造；非法返回 [`AppError::InvalidColor`]。
     /// `trigger` 参数仅用于错误提示上下文。
+    ///
+    /// # Errors
+    ///
+    /// 返回 [`AppError::InvalidColor`] 当颜色不是合法 HEX 格式。
+    #[must_use = "parsing a hex color always returns a Result that should be checked"]
     pub fn parse(raw: &str, trigger: &str) -> Result<Self, AppError> {
         let s = raw.trim();
         let valid = s.starts_with('#')
@@ -92,35 +97,36 @@ impl ThresholdTriggers {
     /// 顺序遵循字段声明顺序；同一列若被多个触发器命中，取**首个**命中
     /// （由 [`first_hit`] 实现，above 优先于 below）。None/enabled:false/字段为 None
     /// 均跳过。比较为严格 `>`/`<`（不含等于）。
+    #[must_use]
     pub fn evaluate_row<'a>(&'a self, r: &CardRecord) -> Vec<Hit<'a>> {
         let mut hits = Vec::new();
         if let Some(h) = first_hit(
-            &self.core_avg_above,
-            &self.core_avg_below,
+            self.core_avg_above.as_ref(),
+            self.core_avg_below.as_ref(),
             r.core_avg,
             COL_CORE_AVG,
         ) {
             hits.push(h);
         }
         if let Some(h) = first_hit(
-            &self.core_peak_above,
-            &self.core_peak_below,
+            self.core_peak_above.as_ref(),
+            self.core_peak_below.as_ref(),
             r.core_peak,
             COL_CORE_PEAK,
         ) {
             hits.push(h);
         }
         if let Some(h) = first_hit(
-            &self.mem_avg_above,
-            &self.mem_avg_below,
+            self.mem_avg_above.as_ref(),
+            self.mem_avg_below.as_ref(),
             r.mem_avg,
             COL_MEM_AVG,
         ) {
             hits.push(h);
         }
         if let Some(h) = first_hit(
-            &self.mem_peak_above,
-            &self.mem_peak_below,
+            self.mem_peak_above.as_ref(),
+            self.mem_peak_below.as_ref(),
             r.mem_peak,
             COL_MEM_PEAK,
         ) {
@@ -133,8 +139,8 @@ impl ThresholdTriggers {
 /// 对单个列：依次尝试 above / below，返回首个命中的 [`Hit`]。
 /// above 优先（字段声明顺序在前）。
 fn first_hit<'a>(
-    above: &'a Option<TriggerConfig>,
-    below: &'a Option<TriggerConfig>,
+    above: Option<&'a TriggerConfig>,
+    below: Option<&'a TriggerConfig>,
     value: Option<f64>,
     column: &'a str,
 ) -> Option<Hit<'a>> {
@@ -169,12 +175,12 @@ mod tests {
         CardRecord {
             source_name: "s".into(),
             host_ip: "1.1.1.1".into(),
-            node_name: "".into(),
+            node_name: String::new(),
             card_id: "0".into(),
             device_type: "X".into(),
-            namespace: "".into(),
-            pod: "".into(),
-            container: "".into(),
+            namespace: String::new(),
+            pod: String::new(),
+            container: String::new(),
             core_avg: None,
             core_peak: None,
             core_peak_time: None,

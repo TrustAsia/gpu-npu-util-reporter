@@ -1,11 +1,11 @@
 //! 资产映射引擎模块。
 //!
-//! 职责二合一：(1) 加载外部资产表（CSV/Excel）并按 match_key 与每行
+//! 职责二合一：(1) 加载外部资产表（CSV/Excel）并按 `match_key` 与每行
 //! [`CardRecord`] 做 Join，注入资产字段；(2) 计算映射列在报表中的最终位置
 //! （锚点列 + before/after 方向）。开关关闭时整个模块跳过。
 //!
-//! Join 设计：加载阶段为每行资产注入一个隐藏列 `@key`（由 match_keys 指定的
-//! 资产列拼成），join 时把 CardRecord 同样字段拼成 key 直接比对，O(行数) 查找。
+//! Join 设计：加载阶段为每行资产注入一个隐藏列 `@key`（由 `match_keys` 指定的
+//! 资产列拼成），join 时把 `CardRecord` 同样字段拼成 key 直接比对，O(行数) 查找。
 
 use crate::error::AppError;
 use crate::processor::CardRecord;
@@ -35,7 +35,7 @@ pub const BASE_COLUMNS: &[&str] = &[
 /// 列插入位置：相对于某锚点列的前/后。
 ///
 /// serde 表示为一个对象 `{ direction: before|after, anchor: <列名> }`，
-/// 而非外部标记枚举——因为 serde_yaml 不支持默认的 externally-tagged 变体。
+/// 而非外部标记枚举——因为 `serde_yaml` 不支持默认的 externally-tagged 变体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InsertPosition {
     /// 方向：`before` 或 `after`。
@@ -82,7 +82,7 @@ pub struct MappingColumn {
     pub position: InsertPosition,
 }
 
-/// 匹配键：从 CardRecord / 资产行取哪些字段拼 join key。
+/// 匹配键：从 `CardRecord` / 资产行取哪些字段拼 join key。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKey {
@@ -104,7 +104,7 @@ pub struct MappingConfig {
 /// 资产表行：列名 → 值（含加载阶段注入的 `@key`）。
 type AssetRow = HashMap<String, String>;
 
-/// 资产表里 match_key 对应的列名（约定与 CardRecord 字段同名）。
+/// 资产表里 `match_key` 对应的列名（约定与 `CardRecord` 字段同名）。
 fn asset_key_label(k: &MatchKey) -> &'static str {
     match k {
         MatchKey::HostIp => "host_ip",
@@ -113,7 +113,7 @@ fn asset_key_label(k: &MatchKey) -> &'static str {
     }
 }
 
-/// 为一行资产注入 `@key`（由 match_keys 指定的列拼成）。
+/// 为一行资产注入 `@key`（由 `match_keys` 指定的列拼成）。
 fn inject_key(row: &mut AssetRow, match_keys: &[MatchKey]) {
     let key = match_keys
         .iter()
@@ -137,7 +137,7 @@ fn join_key(rec: &CardRecord, keys: &[MatchKey]) -> String {
 
 /// 计算最终列顺序：基础列 + 按 position 插入的映射列。
 ///
-/// 算法：每个 MappingColumn 解析出目标 index（Before(X)→X 的 index，
+/// 算法：每个 `MappingColumn` 解析出目标 index（Before(X)→X 的 index，
 /// After(X)→X 的 index + 1）。**位置锚点 X 必须是基础列之一**（PRD §2.3
 /// 锚点约束）——不允许以其它映射列为锚点。因此所有目标 index 由基础列布局
 /// 唯一确定、互不影响，一次性计算即可。按 index 升序、同 index 按 config
@@ -148,6 +148,7 @@ fn join_key(rec: &CardRecord, keys: &[MatchKey]) -> String {
 /// PRD §2.3 锚点约束：映射列的位置锚点必须是基础列之一；否则记 Warning 并把
 /// 该列追加到末尾（追加行为在 [`compute_column_order`] 中实现）。本函数只负责
 /// 产出 Warning 文本，由 main 统一收集打印，便于单元测试。
+#[must_use]
 pub fn missing_anchor_warnings(base: &[&str], mapping_cols: &[MappingColumn]) -> Vec<String> {
     mapping_cols
         .iter()
@@ -161,8 +162,9 @@ pub fn missing_anchor_warnings(base: &[&str], mapping_cols: &[MappingColumn]) ->
         .collect()
 }
 
+#[must_use]
 pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Vec<String> {
-    let mut result: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+    let mut result: Vec<String> = base.iter().map(ToString::to_string).collect();
     // 目标 index 仅取决于基础列（锚点被约束为基础列），互不影响
     let mut placements: Vec<(usize, String)> = mapping_cols
         .iter()
@@ -188,13 +190,21 @@ pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Ve
     result
 }
 
-/// 加载资产表，并为每行注入 `@key`（由 match_keys 指定的列拼成）。
+/// 加载资产表，并为每行注入 `@key`（由 `match_keys` 指定的列拼成）。
 /// 按扩展名分流：`.csv` 用 csv crate，`.xlsx`/`.xls` 用 calamine。首行视为表头。
+///
+/// # Errors
+///
+/// 返回 [`AppError::Mapping`] 当文件读取/解析失败或格式不支持。
 pub fn load_asset_table(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppError> {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".csv") {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "csv" {
         load_csv(path, match_keys)
-    } else if lower.ends_with(".xlsx") || lower.ends_with(".xls") {
+    } else if ext == "xlsx" || ext == "xls" {
         load_xlsx(path, match_keys)
     } else {
         Err(AppError::Mapping {
@@ -219,7 +229,7 @@ fn load_csv(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppErr
             detail: format!("解析表头失败：{e}"),
         })?
         .iter()
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
     for rec in rdr.records() {
@@ -262,7 +272,7 @@ fn load_xlsx(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppEr
         path: path.into(),
         detail: "Excel 首行（表头）为空".into(),
     })?;
-    let headers: Vec<String> = header.iter().map(|c| c.to_string()).collect();
+    let headers: Vec<String> = header.iter().map(ToString::to_string).collect();
     let mut rows = Vec::new();
     for row in iter {
         let mut m = HashMap::new();
@@ -277,8 +287,9 @@ fn load_xlsx(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppEr
     Ok(rows)
 }
 
-/// 对一行 CardRecord 做 join，返回 (rename → value)。
+/// 对一行 `CardRecord` 做 join，返回 (rename → value)。
 /// 未命中返回空 map（调用方记 Warning）。
+#[must_use]
 pub fn join_record(
     rec: &CardRecord,
     assets: &[AssetRow],
@@ -287,7 +298,7 @@ pub fn join_record(
     let key = join_key(rec, &cfg.match_keys);
     let mut out = HashMap::new();
     for row in assets {
-        if row.get("@key").map(|s| s.as_str()) == Some(key.as_str()) {
+        if row.get("@key").map(String::as_str) == Some(key.as_str()) {
             for col in &cfg.columns {
                 if let Some(v) = row.get(&col.source_field) {
                     out.insert(col.rename.clone(), v.clone());
@@ -309,12 +320,12 @@ mod tests {
         CardRecord {
             source_name: "s".into(),
             host_ip: ip.into(),
-            node_name: "".into(),
+            node_name: String::new(),
             card_id: card.into(),
             device_type: "X".into(),
-            namespace: "".into(),
-            pod: "".into(),
-            container: "".into(),
+            namespace: String::new(),
+            pod: String::new(),
+            container: String::new(),
             core_avg: None,
             core_peak: None,
             core_peak_time: None,
@@ -378,7 +389,7 @@ mod tests {
     fn join_record_hits_and_misses() {
         let cfg = MappingConfig {
             enabled: true,
-            source_path: "".into(),
+            source_path: String::new(),
             match_keys: vec![MatchKey::HostIp, MatchKey::CardId],
             columns: vec![MappingColumn {
                 source_field: "机房".into(),
@@ -417,7 +428,7 @@ mod tests {
         ];
         let ws = missing_anchor_warnings(BASE_COLUMNS, &cols);
         assert_eq!(ws.len(), 1, "只对非法锚点产出 Warning");
-        assert!(ws[0].contains("X"));
+        assert!(ws[0].contains('X'));
         assert!(ws[0].contains("不存在"));
     }
 

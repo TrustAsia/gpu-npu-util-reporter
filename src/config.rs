@@ -101,6 +101,7 @@ pub struct AppConfig {
 /// 注：用普通字符串字面量 + `replace` 注入设备块，而不是 `format!`，因为模板里
 /// 含大量 YAML 花括号（如 `{ after: "主机IP" }`、`["nvidia_a10", ...]`），
 /// 这些会被 `format!` 误当成格式化参数。
+#[must_use]
 pub fn default_config_yaml() -> String {
     // 注：用 r##"..."## 原始字符串，因为模板内含 `"#`（如 color: "#FF0000"），
     // r#" 会在第一个 "# 处提前结束。r## 允许内容里出现单个 "#。
@@ -172,8 +173,8 @@ report:
         .replace("__ASCEND__", &indent_device(2, &ascend_910b_spec()))
 }
 
-/// 把 DeviceSpec 序列化后按 `level` 层（每层 2 空格）缩进，嵌入到 `key:` 下方。
-/// serde_yaml 顶层可能带一个 `---` 文档标记，需去掉。
+/// 带 `DeviceSpec` 序列化后按 `level` 层（每层 2 空格）缩进，嵌入到 `key:` 下方。
+/// `serde_yaml` 顶层可能带一个 `---` 文档标记，需去掉。
 fn indent_device(level: usize, spec: &DeviceSpec) -> String {
     let yaml = serde_yaml::to_string(spec).unwrap_or_default();
     let pad = " ".repeat(level * 2);
@@ -185,6 +186,10 @@ fn indent_device(level: usize, spec: &DeviceSpec) -> String {
 }
 
 /// 加载配置：若路径不存在则写出默认并返回 `Ok(None)` 让 main 提示退出。
+///
+/// # Errors
+///
+/// 返回 [`AppError::Config`] 当文件读取失败或 YAML 解析失败。
 pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
     if !std::path::Path::new(path).exists() {
         std::fs::write(path, default_config_yaml()).map_err(|e| AppError::Config {
@@ -206,13 +211,17 @@ pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
 
 /// 用 CLI 覆盖配置字段（start/end/output）。
 /// 要求：start 与 end 必须同时给或同时不给。
+///
+/// # Errors
+///
+/// 返回 [`AppError::Config`] 当 start/end 只给了一个，或时间格式无效。
 pub fn apply_overrides(mut cfg: AppConfig, ov: &CliOverrides) -> Result<AppConfig, AppError> {
     match (&ov.start, &ov.end) {
         (Some(s), Some(e)) => {
             validate_time(s)?;
             validate_time(e)?;
-            cfg.time_range.start = s.clone();
-            cfg.time_range.end = e.clone();
+            cfg.time_range.start.clone_from(s);
+            cfg.time_range.end.clone_from(e);
         }
         (None, None) => {}
         _ => {
@@ -223,7 +232,7 @@ pub fn apply_overrides(mut cfg: AppConfig, ov: &CliOverrides) -> Result<AppConfi
         }
     }
     if let Some(o) = &ov.output {
-        cfg.report.output_path = o.clone();
+        cfg.report.output_path.clone_from(o);
     }
     Ok(cfg)
 }

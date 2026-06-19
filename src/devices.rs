@@ -26,17 +26,17 @@ pub struct LabelMapping {
 ///
 /// serde 表示采用 `#[serde(untagged)]` + newtype 包装，使 YAML 形如
 /// `composite_ratio: { used, free }` / `direct_metric: { metric, fallback }` /
-/// `composite_from_total: { used, total }`（外部命名的单键 map），兼容 serde_yaml
-/// 对带字段变体的限制（serde_yaml 不支持默认的 externally-tagged 字段变体）。
+/// `composite_from_total: { used, total }`（外部命名的单键 map），兼容 `serde_yaml`
+/// 对带字段变体的限制（`serde_yaml` 不支持默认的 externally-tagged 字段变体）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum MemoryStrategy {
-    /// used/(used+free)*100 组合（如 GPU 的 FB_USED/(FB_USED+FB_FREE)）。
+    /// used/(used+free)*100 组合（如 GPU 的 `FB_USED/(FB_USED+FB_FREE)`）。
     CompositeRatio(CompositeRatioBody),
     /// 直接读一个利用率指标（如 NPU 的 `npu_chip_info_hbm_utilization`）。
     /// `fallback` 在该指标查询为空时启用。
     DirectMetric(DirectMetricBody),
-    /// used/total*100 组合（如 NPU fallback 的 hbm_used/hbm_total）。
+    /// used/total*100 组合（如 NPU fallback 的 `hbm_used/hbm_total`）。
     CompositeFromTotal(CompositeFromTotalBody),
 }
 
@@ -77,6 +77,7 @@ pub struct DirectInner {
 
 impl MemoryStrategy {
     /// 便捷构造：GPU 组合公式。
+    #[must_use]
     pub fn composite_ratio(used: &str, free: &str) -> Self {
         MemoryStrategy::CompositeRatio(CompositeRatioBody {
             composite_ratio: UsedFree {
@@ -86,6 +87,7 @@ impl MemoryStrategy {
         })
     }
     /// 便捷构造：NPU used/total 组合。
+    #[must_use]
     pub fn composite_from_total(used: &str, total: &str) -> Self {
         MemoryStrategy::CompositeFromTotal(CompositeFromTotalBody {
             composite_from_total: UsedTotal {
@@ -121,6 +123,7 @@ pub struct DeviceSpec {
 }
 
 /// NVIDIA A10 预设配方（基于 DCGM Exporter）。
+#[must_use]
 pub fn nvidia_a10_spec() -> DeviceSpec {
     DeviceSpec {
         display_name: "NVIDIA A10".into(),
@@ -139,6 +142,7 @@ pub fn nvidia_a10_spec() -> DeviceSpec {
 ///
 /// 显存优先读 `npu_chip_info_hbm_utilization`；为空时 fallback 到
 /// `hbm_used_memory / hbm_total_memory`（PRD §2.2）。
+#[must_use]
 pub fn ascend_910b_spec() -> DeviceSpec {
     DeviceSpec {
         display_name: "Ascend 910B".into(),
@@ -173,7 +177,7 @@ mod tests {
                 assert_eq!(b.composite_ratio.used, "DCGM_FI_DEV_FB_USED");
                 assert_eq!(b.composite_ratio.free, "DCGM_FI_DEV_FB_FREE");
             }
-            other => panic!("期望 CompositeRatio，得到 {:?}", other),
+            other => panic!("期望 CompositeRatio，得到 {other:?}"),
         }
     }
 
@@ -187,7 +191,7 @@ mod tests {
                 let fb = b.direct_metric.fallback.as_ref().expect("应有 fallback");
                 assert!(matches!(fb.as_ref(), MemoryStrategy::CompositeFromTotal(_)));
             }
-            other => panic!("期望 DirectMetric，得到 {:?}", other),
+            other => panic!("期望 DirectMetric，得到 {other:?}"),
         }
     }
 

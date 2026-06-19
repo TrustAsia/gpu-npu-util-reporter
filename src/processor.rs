@@ -68,11 +68,13 @@ pub struct MetricStats {
 /// 对一组点做均值/峰值/峰值时间聚合。
 ///
 /// 空输入返回 `None`。峰值取最大值；多个点同为最大时取最早的时间戳（稳定）。
+#[must_use]
 pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
     if points.is_empty() {
         return None;
     }
     let sum: f64 = points.iter().map(|(_, v)| *v).sum();
+    #[allow(clippy::cast_precision_loss)]
     let avg = sum / points.len() as f64;
     // 取最大值；并列取最早时间戳（va 相同时 tb 越小越优先 → .then(tb.cmp(ta))）。
     // max_by 对非空迭代器必返回 Some；这里用 match 显式处理，避免 expect/panic。
@@ -93,6 +95,7 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
 /// `used`/`total` 为显存字节/MB 的原始序列。返回 fallback 后的 [`Series`]：
 /// 点数与 used 对齐（按 timestamp 与 total 对齐），total 为 0 的点丢弃。
 /// 调用方应：先尝试 `aggregate(direct.points)`；为空时再调用本函数并聚合结果。
+#[must_use]
 pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
     // 按 timestamp 对齐 used 与 total
     let total_map: std::collections::HashMap<i64, f64> = total
@@ -117,7 +120,8 @@ pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
 /// 从一组归属时序点中取"末态"标签值（最后一个非空字符串）。
 ///
 /// `tagged_points` 是 (时间戳, 该标签值) 序列；空或全空返回空串。
-/// 由 pipeline 的 last_in_range 归属模式调用（PRD §2.4）。
+/// 由 pipeline 的 `last_in_range` 归属模式调用（PRD §2.4）。
+#[must_use]
 pub fn last_non_empty(tagged_points: &[(DateTime<Utc>, String)]) -> String {
     tagged_points
         .iter()
@@ -131,6 +135,7 @@ pub fn last_non_empty(tagged_points: &[(DateTime<Utc>, String)]) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::collections::HashMap;
 
     fn t(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(secs, 0).unwrap()
@@ -160,11 +165,11 @@ mod tests {
     #[test]
     fn hbm_fallback_divides_used_by_total() {
         let used = Series {
-            labels: Default::default(),
+            labels: HashMap::default(),
             points: vec![(t(0), 50.0), (t(60), 60.0)],
         };
         let total = Series {
-            labels: Default::default(),
+            labels: HashMap::default(),
             points: vec![(t(0), 200.0), (t(60), 0.0)], // t60 total=0 应被丢弃
         };
         let fb = hbm_fallback_series(&used, &total);
@@ -176,7 +181,7 @@ mod tests {
     fn last_non_empty_picks_latest_nonempty() {
         let pts = vec![
             (t(0), "pod-a".to_string()),
-            (t(60), "".to_string()),
+            (t(60), String::new()),
             (t(120), "pod-b".to_string()),
         ];
         assert_eq!(last_non_empty(&pts), "pod-b");
@@ -184,7 +189,7 @@ mod tests {
 
     #[test]
     fn last_non_empty_all_empty_returns_empty() {
-        let pts = vec![(t(0), "".to_string()), (t(60), "".to_string())];
+        let pts = vec![(t(0), String::new()), (t(60), String::new())];
         assert_eq!(last_non_empty(&pts), "");
     }
 }

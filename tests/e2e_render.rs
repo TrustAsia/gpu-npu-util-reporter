@@ -1,9 +1,10 @@
-//! 端到端渲染集成测试：构造一条 CardRecord + 命中阈值触发器，渲染为 xlsx
+//! 端到端渲染集成测试：构造一条 `CardRecord` + 命中阈值触发器，渲染为 xlsx
 //! 字节缓冲，用 calamine 读回断言行数。
 //!
 //! 注：calamine 0.26 稳定 API 不暴露单元格填充色，因此"染色命中"由
 //! highlight 模块的单元测试覆盖；本测试只验证渲染产出有效 xlsx 且行列数正确。
 
+use calamine::{open_workbook_from_rs, Reader, Xlsx};
 use chrono::TimeZone;
 use chrono::Utc;
 use gpu_npu_util_reporter::highlight::{HexColor, ThresholdTriggers, TriggerConfig};
@@ -41,14 +42,13 @@ fn renders_report_with_highlight_and_reads_back() {
         ..Default::default()
     };
     let spec = ReportSpec {
-        base_columns: BASE_COLUMNS.iter().map(|s| s.to_string()).collect(),
+        base_columns: BASE_COLUMNS.iter().map(ToString::to_string).collect(),
         mapping_renames: vec![],
     };
     let buf = render_to_buffer(&[rec], &spec, &[], &tr, &HashMap::new()).unwrap();
     assert!(buf.len() > 1000, "应生成非空 xlsx 字节");
 
     // 用 calamine 读回断言行数
-    use calamine::{open_workbook_from_rs, Reader, Xlsx};
     let mut r: Xlsx<_> = open_workbook_from_rs(std::io::Cursor::new(buf)).unwrap();
     let name = r.sheet_names()[0].clone();
     let range = r.worksheet_range(&name).unwrap();

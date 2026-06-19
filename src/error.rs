@@ -26,7 +26,7 @@ pub enum AppError {
         detail: String,
     },
 
-    /// PromQL 查询被 Prometheus 拒绝或返回非成功状态。
+    /// `PromQL` 查询被 Prometheus 拒绝或返回非成功状态。
     #[error("[错误] PromQL 查询返回异常（{source_name}）：{detail}")]
     Promql { source_name: String, detail: String },
 
@@ -58,6 +58,7 @@ pub enum AppError {
 impl AppError {
     /// 判断是否为非致命警告（调用方据此决定是否继续）。
     /// 预留接口，供未来告警统一化使用。
+    #[must_use]
     #[allow(dead_code)]
     pub fn is_warning(&self) -> bool {
         matches!(self, AppError::Warning { .. })

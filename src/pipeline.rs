@@ -1,13 +1,13 @@
 //! 采集编排流水线模块（从 main.rs 抽出，提升可测试性）。
 //!
 //! 职责：给定一个 [`MetricFetcher`] + 设备配方 + 时间范围，拉取核心/显存时序，
-//! 按 (host_ip, card_id) 分组聚合为 [`CardRecord`] 列表，并收集过程中的非致命
+//! 按 (`host_ip`, `card_id`) 分组聚合为 [`CardRecord`] 列表，并收集过程中的非致命
 //! Warning（PRD §5.2：单源/单卡失败降级为 N/A 且记 Warning，而非静默吞掉）。
 //!
 //! 本模块是 Critical 修复的核心落点：
 //! - **C2**：fetch 失败 → Warning（见 [`CollectOutcome`] 的 `warnings`）。
 //! - **C3**：HBM fallback 不再依赖全 label 相等（含 `__name__`），改按
-//!   (host_ip, card_id) join。
+//!   (`host_ip`, `card_id`) join。
 //! - **C1**：归属 `last_in_range` 模式：对每张卡额外查归属标签序列，
 //!   取时间范围内最后一个非空值；`instant` 模式取查询返回的瞬时标签。
 //! - **I7**：分组用 `(Option<Series>, Option<Series>)`，避免或无 core 数据时
@@ -23,7 +23,7 @@ use std::collections::HashMap;
 /// 采集过程中的共享上下文：时间范围、设备配方、配置、结果收集器。
 ///
 /// 把 `fallback_used_total` / `ownership_for` 等函数的公共参数打包，
-/// 避免函数签名过长（clippy too_many_arguments）。
+/// 避免函数签名过长（clippy `too_many_arguments`）。
 struct QueryContext<'a> {
     fetcher: &'a dyn MetricFetcher,
     spec: &'a DeviceSpec,
@@ -47,6 +47,7 @@ pub enum OwnershipMode {
 
 impl OwnershipMode {
     /// 从配置字符串解析；未知值回退到 `LastInRange`（与默认配置一致）。
+    #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim() {
             "instant" => OwnershipMode::Instant,
@@ -75,11 +76,12 @@ impl CollectOutcome {
 /// 流程：
 /// 1. 查核心利用率序列（失败→Warning，继续）。
 /// 2. 按显存策略查显存序列（CompositeRatio / DirectMetric）；DirectMetric 为空
-///    时触发 HBM fallback（拉 used/total，按 (ip,card_id) join 重算）。
-/// 3. 按 (host_ip, card_id) 分组；同一卡的核心/显存各自占 `Option` 槽位，
+///    时触发 HBM fallback（拉 used/total，按 (`ip`, `card_id`) join 重算）。
+/// 3. 按 (`host_ip`, `card_id`) 分组；同一卡的核心/显存各自占 `Option` 槽位，
 ///    互不覆写。只有 core 或只有 mem 的卡也会被保留（对应字段 N/A）。
 /// 4. 归属：Instant 取标签瞬时值；LastInRange 额外查 namespace/pod/container
 ///    三条归属标签序列并取末态非空值。
+#[allow(clippy::too_many_lines)]
 pub async fn collect_device(
     fetcher: &dyn MetricFetcher,
     source_name: &str,
@@ -134,9 +136,7 @@ pub async fn collect_device(
     // 3. NPU fallback：direct/顶层显存为空时，按 used/total 重算（C3 + I8 修复）。
     //    - DirectMetric：direct 为空 → 用其 fallback（若有）。
     //    - CompositeFromTotal（顶层）：直接按 used/total 计算。
-    let effective_mem = if !mem_series.is_empty() {
-        mem_series
-    } else {
+    let effective_mem = if mem_series.is_empty() {
         match &ctx.spec.memory {
             MemoryStrategy::DirectMetric(b) => {
                 if let Some(fb) = &b.direct_metric.fallback {
@@ -150,8 +150,10 @@ pub async fn collect_device(
                 fallback_used_total(&mut ctx, &MemoryStrategy::CompositeFromTotal(top.clone()))
                     .await
             }
-            _ => Vec::new(),
+            MemoryStrategy::CompositeRatio(_) => Vec::new(),
         }
+    } else {
+        mem_series
     };
 
     // 4. 分组：(host_ip, card_id) → (core?, mem?)。同一卡多 series（如 Pod 漂移
@@ -193,12 +195,10 @@ pub async fn collect_device(
 
         let (c_avg, c_peak, c_peak_t) = core
             .as_ref()
-            .map(|c| stat3(&c.points))
-            .unwrap_or((None, None, None));
+            .map_or((None, None, None), |c| stat3(&c.points));
         let (m_avg, m_peak, m_peak_t) = mem
             .as_ref()
-            .map(|m| stat3(&m.points))
-            .unwrap_or((None, None, None));
+            .map_or((None, None, None), |m| stat3(&m.points));
 
         // 归属
         let (namespace, pod, container) =
@@ -228,9 +228,9 @@ pub async fn collect_device(
 
 /// 把一条 series 合并进 `Option<Series>` 槽位：空则初始化；非空则把新点追加
 /// 到既有 series 的 points 末尾，并保留首个 series 的标签（身份标签已由 join key
-/// 对齐，归属标签的取值由 ownership_for 单独处理）。
+/// 对齐，归属标签的取值由 `ownership_for` 单独处理）。
 ///
-/// 这避免了 Pod 漂移场景下多条 series 共享同一 (ip,card_id) 时后者覆写前者、
+/// 这避免了 Pod 漂移场景下多条 series 共享同一 (`ip`, `card_id`) 时后者覆写前者、
 /// 导致聚合丢点的问题。
 fn merge_into(slot: &mut Option<Series>, incoming: Series) {
     match slot {
@@ -256,7 +256,7 @@ async fn fetch_with_warning(ctx: &mut QueryContext<'_>, promql: &str) -> Vec<Ser
     }
 }
 
-/// HBM fallback：拉 used/total，按 (host_ip, card_id) 对齐重算（C3 修复）。
+/// HBM fallback：拉 used/total，按 (`host_ip`, `card_id`) 对齐重算（C3 修复）。
 ///
 /// 关键：不再用 `t.labels == u.labels` 比较——Prometheus matrix 结果带 `__name__`
 /// 标签（used 与 total 的 `__name__` 不同），全 label 相等永远不成立，会导致
@@ -341,7 +341,7 @@ async fn ownership_for(
 }
 
 /// 从多条 series 中取某标签的末态非空值：把每条 series 的 (最大时间戳, 标签值)
-/// 收集后按时间排序，取末态非空（PRD §2.4 last_in_range 语义）。
+/// 收集后按时间排序，取末态非空（PRD §2.4 `last_in_range` 语义）。
 ///
 /// 每条 series 用其最大点时间戳代表"该标签值出现的最晚时刻"——Pod 漂移产出
 /// 不同 series，最晚出现的 series 即窗口末态归属。
@@ -358,7 +358,7 @@ fn last_label_value(series: &[Series], label: &str) -> String {
     last_non_empty(&tagged)
 }
 
-/// 把一组点聚合成 (avg, peak, peak_time)，空则全 None。
+/// 把一组点聚合成 (avg, peak, `peak_time`)，空则全 None。
 fn stat3(points: &[(DateTime<Utc>, f64)]) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
     match aggregate(points) {
         Some(s) => (Some(s.avg), Some(s.peak), Some(s.peak_time)),
@@ -366,7 +366,7 @@ fn stat3(points: &[(DateTime<Utc>, f64)]) -> (Option<f64>, Option<f64>, Option<D
     }
 }
 
-/// 序列分组 key：host_ip + card_id（C3 join 也复用此 key）。
+/// 序列分组 `key`：`host_ip` + `card_id`（C3 join 也复用此 key）。
 pub(crate) fn series_key(s: &Series, spec: &DeviceSpec, cfg: &AppConfig) -> String {
     let ip = extract_ip(&s.labels, &cfg.host_ip.prefer_label);
     let card = s
@@ -377,7 +377,7 @@ pub(crate) fn series_key(s: &Series, spec: &DeviceSpec, cfg: &AppConfig) -> Stri
     format!("{ip}|{card}")
 }
 
-/// 从标签取主机 IP：优先 prefer_label，否则 instance 去端口。
+/// 从标签取主机 IP：优先 `prefer_label`，否则 instance 去端口。
 pub(crate) fn extract_ip(labels: &HashMap<String, String>, prefer: &str) -> String {
     if let Some(v) = labels.get(prefer) {
         if !v.is_empty() {

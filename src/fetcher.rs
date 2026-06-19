@@ -1,8 +1,8 @@
 //! 数据源适配层模块。
 //!
-//! 通过 [`MetricFetcher`] trait 抽象"查询某 PromQL 在时间范围内的时序"，
+//! 通过 [`MetricFetcher`] trait 抽象"查询某 `PromQL` 在时间范围内的时序"，
 //! 具体实现 [`PrometheusFetcher`] 走 HTTP `/api/v1/query_range` 与
-//! `/api/v1/query`。fetcher 还负责把显存组合公式翻译成单条 PromQL
+//! `/api/v1/query`。fetcher 还负责把显存组合公式翻译成单条 `PromQL`
 //! （[`gpu_memory_promql`]）。
 
 use crate::error::AppError;
@@ -39,6 +39,7 @@ pub struct PrometheusFetcher {
 }
 
 impl PrometheusFetcher {
+    #[must_use]
     pub fn new(source_name: String, base_url: String, timeout_secs: u64) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -158,6 +159,9 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
                         if !v.is_finite() {
                             continue;
                         }
+                        // Prometheus 时间戳为 Unix 秒（f64），转 i64 截断是安全的：
+                        // 实际值范围远在 i64 精度内。
+                        #[allow(clippy::cast_possible_truncation)]
                         if let Some(dt) = DateTime::<Utc>::from_timestamp(ts as i64, 0) {
                             points.push((dt, v));
                         }
@@ -171,6 +175,7 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
             PromResult::Vector { metric, value } => {
                 if let Ok(v) = value.1.parse::<f64>() {
                     if v.is_finite() {
+                        #[allow(clippy::cast_possible_truncation)]
                         if let Some(dt) = DateTime::<Utc>::from_timestamp(value.0 as i64, 0) {
                             out.push(Series {
                                 labels: metric,
@@ -185,7 +190,8 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
     Ok(out)
 }
 
-/// 由 GPU 显存策略生成单条 PromQL（FB_USED/(FB_USED+FB_FREE)*100）。
+/// 由 GPU 显存策略生成单条 `PromQL`（`FB_USED/(FB_USED+FB_FREE)*100`）。
+#[must_use]
 pub fn gpu_memory_promql(used: &str, free: &str) -> String {
     format!("{used} / ({used} + {free}) * 100")
 }
@@ -211,12 +217,14 @@ impl Default for MockFetcher {
 
 #[cfg(test)]
 impl MockFetcher {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             responses: Vec::new(),
         }
     }
     /// 注册：当 promql 含 `needle` 子串时返回 `res`。
+    #[must_use]
     pub fn when(mut self, needle: impl Into<String>, res: Result<Vec<Series>, AppError>) -> Self {
         self.responses.push((needle.into(), res));
         self

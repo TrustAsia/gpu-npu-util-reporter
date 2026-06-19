@@ -37,6 +37,7 @@ struct Args {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
     let args = Args::parse();
     let overrides = CliOverrides {
@@ -84,7 +85,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let step = Duration::seconds(cfg.report.query_step_secs as i64);
+    let step = Duration::seconds(cfg.report.query_step_secs.cast_signed());
 
     // 3. 采集 + 聚合（单源/单卡失败 → Warning，不中断）
     let mut warnings: Vec<String> = Vec::new();
@@ -92,15 +93,14 @@ async fn main() -> ExitCode {
     for src in &cfg.sources {
         let fetcher = PrometheusFetcher::new(src.name.clone(), src.url.clone(), src.timeout_secs);
         for dt_key in &src.device_types {
-            let spec = match cfg.devices.get(dt_key) {
-                Some(s) => s.clone(),
-                None => {
-                    warnings.push(format!(
-                        "数据源 {} 引用了未定义的设备类型 {}",
-                        src.name, dt_key
-                    ));
-                    continue;
-                }
+            let spec = if let Some(s) = cfg.devices.get(dt_key) {
+                s.clone()
+            } else {
+                warnings.push(format!(
+                    "数据源 {} 引用了未定义的设备类型 {}",
+                    src.name, dt_key
+                ));
+                continue;
             };
             let outcome =
                 pipeline::collect_device(&fetcher, &src.name, &spec, start, end, step, &cfg).await;
@@ -151,7 +151,7 @@ async fn main() -> ExitCode {
 
     // 6. 渲染
     let spec = reporter::ReportSpec {
-        base_columns: mapper::BASE_COLUMNS.iter().map(|s| s.to_string()).collect(),
+        base_columns: mapper::BASE_COLUMNS.iter().map(ToString::to_string).collect(),
         mapping_renames: mapping_columns.iter().map(|c| c.rename.clone()).collect(),
     };
     match reporter::render_to_buffer(

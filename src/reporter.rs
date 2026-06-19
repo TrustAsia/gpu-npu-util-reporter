@@ -1,6 +1,6 @@
 //! 报告渲染层模块。
 //!
-//! 隔离 rust_xlsxwriter，专职把 `Vec<CardRecord>` + 列布局 + 染色决策写成带样式的
+//! 隔离 `rust_xlsxwriter`，专职把 `Vec<CardRecord>` + 列布局 + 染色决策写成带样式的
 //! `.xlsx`。基础列顺序来自 [`mapper::BASE_COLUMNS`](crate::mapper::BASE_COLUMNS)，
 //! 映射列位置由 mapper 计算后传入；阈值染色由 highlight 计算命中后传入颜色。
 
@@ -11,11 +11,12 @@ use crate::mapper::MappingColumn;
 use crate::processor::CardRecord;
 use rust_xlsxwriter::{Color, Format, Workbook};
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 /// 报表列规格：基础列清单 + 映射列 rename（用于校验/未来扩展）。
 pub struct ReportSpec {
     pub base_columns: Vec<String>,
-    /// 映射列 rename 清单（当前未直接参与渲染，列顺序已由 compute_column_order 决定）。
+    /// 映射列 rename 清单（当前未直接参与渲染，列顺序已由 `compute_column_order` 决定）。
     pub mapping_renames: Vec<String>,
 }
 
@@ -24,19 +25,24 @@ pub struct ReportSpec {
 /// - 首行冻结 + 加粗 + 深蓝底白字
 /// - 利用率列存为 value/100，数字格式 0.00%；N/A 写字符串 "N/A"
 /// - 时间列以 `YYYY-MM-DD HH:MM:SS` 文本输出（PRD §3 显示要求；
-///   规避 rust_xlsxwriter 0.79 中 chrono 不实现 IntoExcelDateTime 的限制）
+///   规避 `rust_xlsxwriter` 0.79 中 chrono 不实现 `IntoExcelDateTime` 的限制）
 /// - 命中染色单元格套对应 HEX 背景色 Format
-pub fn render_to_buffer(
+///
+/// # Errors
+///
+/// 返回 [`AppError::Report`] 当 Excel 写操作失败。
+#[allow(clippy::too_many_lines)]
+pub fn render_to_buffer<S: BuildHasher>(
     records: &[CardRecord],
     spec: &ReportSpec,
     mapping_columns: &[MappingColumn],
     thresholds: &ThresholdTriggers,
-    mapping_values: &HashMap<(usize, String), String>, // (行索引, rename) -> 资产值
+    mapping_values: &HashMap<(usize, String), String, S>, // (行索引, rename) -> 资产值
 ) -> Result<Vec<u8>, AppError> {
     // 让 mapping_renames 不触发未使用警告（保留字段以备未来校验）。
     let _ = &spec.mapping_renames;
 
-    let base_refs: Vec<&str> = spec.base_columns.iter().map(|s| s.as_str()).collect();
+    let base_refs: Vec<&str> = spec.base_columns.iter().map(String::as_str).collect();
     let order = compute_column_order(&base_refs, mapping_columns);
 
     let mut wb = Workbook::new();
@@ -49,7 +55,7 @@ pub fn render_to_buffer(
 
     let header_fmt = Format::new()
         .set_bold()
-        .set_background_color(Color::RGB(0x1F4E79))
+        .set_background_color(Color::RGB(0x001F_4E79))
         .set_font_color(Color::White);
     let pct_fmt = Format::new().set_num_format("0.00%");
 
@@ -62,8 +68,11 @@ pub fn render_to_buffer(
 
     // 写表头
     for (i, name) in order.iter().enumerate() {
+        // Excel 列数上限 16384，远在 u16 范围内。
+        #[allow(clippy::cast_possible_truncation)]
+        let col = i as u16;
         sheet
-            .write_string_with_format(0, i as u16, name, &header_fmt)
+            .write_string_with_format(0, col, name, &header_fmt)
             .map_err(|e| AppError::Report {
                 detail: format!("写表头失败：{e}"),
             })?;
@@ -76,7 +85,7 @@ pub fn render_to_buffer(
     // HexColor 已在反序列化/parse 阶段校验为 #RRGGBB（大写），此处解析必然成功；
     // 若因代码 bug 导致意外值，用 match 显式回退到红色（而非静默变黑）。
     let pct_color = |hex: &HexColor| -> Format {
-        let rgb = u32::from_str_radix(&hex.0[1..], 16).unwrap_or(0xFF0000);
+        let rgb = u32::from_str_radix(&hex.0[1..], 16).unwrap_or(0x00FF_0000);
         Format::new()
             .set_background_color(Color::RGB(rgb))
             .set_num_format("0.00%")
@@ -86,6 +95,8 @@ pub fn render_to_buffer(
     let mut col_max_width: Vec<f64> = vec![0.0; order.len()];
 
     for (row_idx, rec) in records.iter().enumerate() {
+        // Excel 行数上限 1048576，远在 u32 范围内。
+        #[allow(clippy::cast_possible_truncation)]
         let excel_row = (row_idx + 1) as u32;
         // 计算该行染色决策（列名 → HEX）
         let hits = thresholds.evaluate_row(rec);
@@ -94,6 +105,8 @@ pub fn render_to_buffer(
 
         for name in &order {
             let idx = *col_index.get(name.as_str()).unwrap_or(&0);
+            // Excel 列数上限 16384，远在 u16 范围内。
+            #[allow(clippy::cast_possible_truncation)]
             let col = idx as u16;
             let hit_color = hit_colors.get(name.as_str()).copied();
             let v = cell_value(rec, name, mapping_values, row_idx);
@@ -142,6 +155,8 @@ pub fn render_to_buffer(
         let header_w = display_width(name);
         let content_w = col_max_width.get(i).copied().unwrap_or(0.0);
         let width = header_w.max(content_w).clamp(10.0, 50.0);
+        // Excel 列数上限 16384，远在 u16 范围内。
+        #[allow(clippy::cast_possible_truncation)]
         let _ = sheet.set_column_width(i as u16, width);
     }
 
@@ -154,18 +169,18 @@ pub fn render_to_buffer(
 ///
 /// `Pct` 是 0–100 的利用率值（写入时除以 100 配合 `0.00%` 格式）；
 /// 时间列统一以 `Text` 输出 `YYYY-MM-DD HH:MM:SS` 字符串（PRD §3 显示要求），
-/// 避免依赖 rust_xlsxwriter 的日期时间转换 API。
+/// 避免依赖 `rust_xlsxwriter` 的日期时间转换 API。
 enum CellValue {
     Pct(f64),
     Text(String),
     Na,
 }
 
-/// 从 CardRecord + 资产值取出某列对应的单元格内容。
-fn cell_value(
+/// 从 `CardRecord` + 资产值取出某列对应的单元格内容。
+fn cell_value<S: BuildHasher>(
     rec: &CardRecord,
     col: &str,
-    mapping_values: &HashMap<(usize, String), String>,
+    mapping_values: &HashMap<(usize, String), String, S>,
     row_idx: usize,
 ) -> CellValue {
     // 时间戳 → "YYYY-MM-DD HH:MM:SS" 字符串
@@ -184,20 +199,18 @@ fn cell_value(
             rec.range_start.format("%Y-%m-%d %H:%M:%S"),
             rec.range_end.format("%Y-%m-%d %H:%M:%S")
         )),
-        "核心利用率平均值" => rec.core_avg.map(CellValue::Pct).unwrap_or(CellValue::Na),
-        "核心利用率峰值" => rec.core_peak.map(CellValue::Pct).unwrap_or(CellValue::Na),
+        "核心利用率平均值" => rec.core_avg.map_or(CellValue::Na, CellValue::Pct),
+        "核心利用率峰值" => rec.core_peak.map_or(CellValue::Na, CellValue::Pct),
         "核心利用率峰值出现时间" => rec
             .core_peak_time
             .map(ts)
-            .map(CellValue::Text)
-            .unwrap_or(CellValue::Na),
-        "显存占用率平均值" => rec.mem_avg.map(CellValue::Pct).unwrap_or(CellValue::Na),
-        "显存占用率峰值" => rec.mem_peak.map(CellValue::Pct).unwrap_or(CellValue::Na),
+            .map_or(CellValue::Na, CellValue::Text),
+        "显存占用率平均值" => rec.mem_avg.map_or(CellValue::Na, CellValue::Pct),
+        "显存占用率峰值" => rec.mem_peak.map_or(CellValue::Na, CellValue::Pct),
         "显存占用率峰值出现时间" => rec
             .mem_peak_time
             .map(ts)
-            .map(CellValue::Text)
-            .unwrap_or(CellValue::Na),
+            .map_or(CellValue::Na, CellValue::Text),
         other => {
             // 映射列：从 mapping_values 取，未命中写空串
             match mapping_values.get(&(row_idx, other.to_string())) {
@@ -245,7 +258,7 @@ fn is_wide(c: char) -> bool {
 
 /// 把 0–100 的利用率值格式化为报表里会显示的文本（用于估算列宽，与 0.00% 格式一致）。
 fn format_pct_text(v: f64) -> String {
-    format!("{:.2}%", v)
+    format!("{v:.2}%")
 }
 
 #[cfg(test)]
