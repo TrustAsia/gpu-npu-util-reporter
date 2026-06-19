@@ -206,7 +206,19 @@ pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
         path: path.into(),
         reason: format!("{e}"),
     })?;
+    validate_config(&cfg, path)?;
     Ok(Some(cfg))
+}
+
+/// 校验配置合法性。
+fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
+    if cfg.report.query_step_secs == 0 {
+        return Err(AppError::Config {
+            path: path.into(),
+            reason: "report.query_step_secs 必须 > 0".into(),
+        });
+    }
+    Ok(())
 }
 
 /// 用 CLI 覆盖配置字段（start/end/output）。
@@ -294,5 +306,12 @@ mod tests {
     fn validate_time_rejects_bad_format() {
         assert!(validate_time("2026/01/01 00:00:00").is_err());
         assert!(validate_time("2026-01-01 00:00:00").is_ok());
+    }
+
+    #[test]
+    fn config_rejects_zero_query_step() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.report.query_step_secs = 0;
+        assert!(validate_config(&cfg, "test.yaml").is_err());
     }
 }

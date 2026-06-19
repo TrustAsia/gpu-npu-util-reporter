@@ -69,13 +69,15 @@ struct PromData {
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum PromResult {
-    Matrix {
-        metric: HashMap<String, String>,
-        values: Vec<(f64, String)>, // (unix_ts, value 字符串)
-    },
+    // Vector 放在前面：serde untagged 按声明顺序尝试，Vector 更具体（单值 vs 数组），
+    // 优先匹配可避免 Vector 被误解析为单元素 Matrix。
     Vector {
         metric: HashMap<String, String>,
         value: (f64, String),
+    },
+    Matrix {
+        metric: HashMap<String, String>,
+        values: Vec<(f64, String)>, // (unix_ts, value 字符串)
     },
 }
 

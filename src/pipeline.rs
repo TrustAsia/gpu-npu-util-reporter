@@ -238,7 +238,11 @@ fn merge_into(slot: &mut Option<Series>, incoming: Series) {
         Some(existing) => {
             existing.points.extend(incoming.points);
             existing.points.sort_by_key(|(ts, _)| *ts);
-            existing.points.dedup_by_key(|(ts, _)| *ts);
+            // 同一时间戳保留最后一个值（最新观测），丢弃更早的点。
+            // dedup_by 保留首个元素，因此先反转，去重后再反转回来。
+            existing.points.reverse();
+            existing.points.dedup_by(|a, b| a.0 == b.0);
+            existing.points.reverse();
         }
         None => *slot = Some(incoming),
     }
@@ -308,9 +312,20 @@ async fn ownership_for(
     mem: Option<&Series>,
 ) -> (String, String, String) {
     if mode == OwnershipMode::Instant {
-        let labels = core
-            .map(|c| &c.labels)
-            .or_else(|| mem.map(|m| &m.labels));
+        // 先尝试从 core 取归属标签；若 core 缺失或归属字段为空，则回退到 mem。
+        let core_labels = core.map(|c| &c.labels);
+        let mem_labels = mem.map(|m| &m.labels);
+        let labels = if let Some(cl) = core_labels {
+            // core 存在但归属字段可能为空，回退到 mem
+            let ns = cl.get(&ctx.spec.labels.namespace).map_or("", String::as_str);
+            if ns.is_empty() {
+                mem_labels
+            } else {
+                Some(cl)
+            }
+        } else {
+            mem_labels
+        };
         let get =
             |k: &str| -> String { labels.and_then(|m| m.get(k)).cloned().unwrap_or_default() };
         return (
@@ -322,11 +337,13 @@ async fn ownership_for(
 
     // LastInRange：按 card_id 过滤重新拉取该卡的归属时序。Pod 漂移会产出
     // 多条 series（每条带不同归属标签集），按点的最大时间戳排序取末态非空。
+    // 对 card_id 值做 PromQL 转义，防止标签值中的引号/反斜杠破坏查询语法。
+    let escaped = card_id.replace('\\', "\\\\").replace('"', "\\\"");
     let promql = format!(
-        "{}{{{a}=\"{v}\"}}",
-        ctx.spec.core_util_metric,
+        "{metric}{{{a}=\"{v}\"}}",
+        metric = ctx.spec.core_util_metric,
         a = ctx.spec.card_id_label,
-        v = card_id
+        v = escaped
     );
     match ctx
         .fetcher
@@ -701,5 +718,71 @@ mod tests {
                 "10.0.0.3|0".to_string(),
             ]
         );
+    }
+
+    // ---- merge_into 去重保留最后值 ----
+
+    #[test]
+    fn merge_into_dedup_keeps_last_value_at_same_timestamp() {
+        use std::collections::HashMap;
+        let mut slot = Some(Series {
+            labels: HashMap::new(),
+            points: vec![(t(0), 10.0), (t(60), 20.0)],
+        });
+        merge_into(
+            &mut slot,
+            Series {
+                labels: HashMap::new(),
+                points: vec![(t(60), 99.0), (t(120), 30.0)],
+            },
+        );
+        let merged = slot.unwrap();
+        assert_eq!(merged.points.len(), 3, "去重后应剩 3 个点");
+        assert_eq!(merged.points[0], (t(0), 10.0));
+        assert_eq!(
+            merged.points[1], (t(60), 99.0),
+            "同一时间戳应保留后者的值"
+        );
+        assert_eq!(merged.points[2], (t(120), 30.0));
+    }
+
+    // ---- instant 模式归属从 mem 标签回退 ----
+
+    #[tokio::test]
+    async fn instant_mode_ownership_falls_back_to_mem_labels() {
+        // core 无归属标签，mem 带归属标签 → instant 模式应从 mem 取归属。
+        let core = vec![Series {
+            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1")]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let mem = vec![Series {
+            labels: labels(&[
+                ("gpu", "0"),
+                ("ip", "1.1.1.1"),
+                ("namespace", "ns-mem"),
+                ("pod", "pod-mem"),
+                ("container", "c-mem"),
+            ]),
+            points: vec![(t(0), 20.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
+            .when(" / (", Ok(mem));
+        let spec = crate::devices::nvidia_a10_spec();
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        let r = &out.records[0];
+        assert_eq!(r.namespace, "ns-mem", "core 无归属时应从 mem 取 namespace");
+        assert_eq!(r.pod, "pod-mem");
+        assert_eq!(r.container, "c-mem");
     }
 }
