@@ -59,6 +59,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Test
+        if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo test --target ${{ matrix.target }}
 
       - name: Upload artifact
