@@ -62,11 +62,17 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo test --target ${{ matrix.target }}
 
+      - name: Rename binary for release
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv gpu-npu-util-reporter${{ matrix.suffix }} gpu-npu-util-reporter-${{ matrix.target }}${{ matrix.suffix }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: gpu-npu-util-reporter-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/gpu-npu-util-reporter${{ matrix.suffix }}
+          path: target/${{ matrix.target }}/release/gpu-npu-util-reporter-${{ matrix.target }}${{ matrix.suffix }}
           if-no-files-found: error
 
   # build-darwin (cross-rs/cross 方式，已替换为 zigbuild)
@@ -154,9 +160,86 @@ jobs:
           SDKROOT: ${{ github.workspace }}/MacOSX14.5.sdk
         run: cargo zigbuild --release --target ${{ matrix.target }}
 
+      - name: Rename binary for release
+        run: |
+          cd target/${{ matrix.target }}/release
+          mv gpu-npu-util-reporter gpu-npu-util-reporter-${{ matrix.target }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: gpu-npu-util-reporter-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/gpu-npu-util-reporter
+          path: target/${{ matrix.target }}/release/gpu-npu-util-reporter-${{ matrix.target }}
           if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: [build-native, build-darwin]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          if git tag -l "v${{ steps.version.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | head -1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            LOG=$(git log "${PREV_TAG}"..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            LOG=$(git log --pretty=format:"- %s (%h)" --no-merges -20)
+          fi
+          # 多行输出需要特殊处理
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "log<<${EOF}" >> "$GITHUB_OUTPUT"
+          echo "$LOG" >> "$GITHUB_OUTPUT"
+          echo "${EOF}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body: |
+            ## Changes
+
+            ${{ steps.changelog.outputs.log }}
+
+            ## Downloads
+
+            | File | Platform |
+            |------|----------|
+            | `gpu-npu-util-reporter-x86_64-pc-windows-msvc.exe` | Windows x86_64 |
+            | `gpu-npu-util-reporter-x86_64-unknown-linux-musl` | Linux x86_64 (static) |
+            | `gpu-npu-util-reporter-aarch64-unknown-linux-musl` | Linux ARM64 (static) |
+            | `gpu-npu-util-reporter-x86_64-apple-darwin` | macOS Intel |
+            | `gpu-npu-util-reporter-aarch64-apple-darwin` | macOS Apple Silicon |
+          files: artifacts/*
+          draft: false
+          prerelease: ${{ steps.check_tag.outputs.exists == 'false' && startsWith(steps.version.outputs.version, '0.') }}
