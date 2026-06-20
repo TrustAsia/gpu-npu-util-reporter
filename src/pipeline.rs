@@ -365,8 +365,12 @@ async fn ownership_for(
             (ns, pod, ct)
         }
         Ok(_) => {
-            // 核心指标无数据（如该卡只有显存数据），回退到显存指标查询归属
-            if let Some(mem_metric) = ctx.spec.memory.first_metric_name() {
+            // 核心指标无数据（如该卡只有显存数据），回退到显存指标查询归属。
+            // 依次尝试所有显存指标（含 fallback 链），因为 DirectMetric 的主指标
+            // 无数据时，fallback 的 used 指标仍可能有归属标签。
+            let mem_names = ctx.spec.memory.ownership_metric_names();
+            let mut ownership = (String::new(), String::new(), String::new());
+            for mem_metric in &mem_names {
                 let mem_promql = format!(
                     "{metric}{{{a}=\"{v}\"}}",
                     metric = mem_metric,
@@ -382,13 +386,13 @@ async fn ownership_for(
                         let ns = last_label_value(&mem_series, &ctx.spec.labels.namespace);
                         let pod = last_label_value(&mem_series, &ctx.spec.labels.pod);
                         let ct = last_label_value(&mem_series, &ctx.spec.labels.container);
-                        (ns, pod, ct)
+                        ownership = (ns, pod, ct);
+                        break;
                     }
-                    _ => (String::new(), String::new(), String::new()),
+                    _ => {}
                 }
-            } else {
-                (String::new(), String::new(), String::new())
             }
+            ownership
         }
         Err(e) => {
             ctx.out.push_warning(format!("{e}"));

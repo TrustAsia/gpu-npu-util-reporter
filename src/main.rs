@@ -249,6 +249,12 @@ async fn main() -> ExitCode {
         &mapping_values,
     ) {
         Ok(buf) => {
+            // 创建输出目录（如果路径含模板变量如 {{start_date}}，目录可能不存在）
+            if let Some(parent) = std::path::Path::new(&output_path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
             if let Err(e) = std::fs::write(&output_path, buf) {
                 error!("报表写入失败：{e}");
                 return ExitCode::from(1);

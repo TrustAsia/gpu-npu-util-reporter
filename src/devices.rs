@@ -135,6 +135,25 @@ impl MemoryStrategy {
             Self::CompositeFromTotal(b) => Some(&b.composite_from_total.used),
         }
     }
+
+    /// 返回所有可能含归属标签的指标名列表（含 fallback 链），供归属查询依次尝试。
+    ///
+    /// 当 `DirectMetric` 的主指标无数据时，其 fallback 的 `used` 指标仍可能有数据
+    /// 和归属标签（namespace/pod/container），因此需要逐级尝试。
+    #[must_use]
+    pub fn ownership_metric_names(&self) -> Vec<&str> {
+        match self {
+            Self::CompositeRatio(b) => vec![&b.composite_ratio.used],
+            Self::DirectMetric(b) => {
+                let mut names = vec![&b.direct_metric.metric as &str];
+                if let Some(fb) = &b.direct_metric.fallback {
+                    names.extend(fb.ownership_metric_names());
+                }
+                names
+            }
+            Self::CompositeFromTotal(b) => vec![&b.composite_from_total.used],
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
