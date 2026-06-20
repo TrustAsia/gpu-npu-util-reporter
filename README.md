@@ -25,7 +25,10 @@
 - **资产映射**：加载外部 CSV / Excel 资产表，按 `host_ip` / `card_id` 等键 join，把机房位置、负责人等字段**注入到指定基础列的前 / 后**（锚点必须为基础列）。
 - **阈值染色（PRD §2.6）**：8 个可独立启用的触发器（核心 / 显存 × 均值 / 峰值 × 高于 / 低于），命中单元格按触发器各自配置的 **HEX 颜色**填充，便于一眼定位过载（红）/ 闲置（橙）。默认全部关闭。
 - **健壮的中文错误提示**：致命错误打印中文上下文并退出码 1；非致命警告收集后正常出报表、对应单元格 N/A、退出码 0；全程不 panic。
-- **高内聚低耦合**：六个模块单向数据流 `config → fetcher → processor → mapper → highlight → reporter`，`MetricFetcher` trait 解耦数据源，`DeviceSpec` 数据化设备规则。
+- **结构化日志**：基于 `tracing`，控制台与文件日志可分别指定级别（trace/debug/info/warn/error），文件日志可独立开关，路径支持模板变量。
+- **相对时间**：`time_range` 支持 `now`、`now-7d`、`start+3h` 等相对时间表达式，便于 cron 定时任务配置。
+- **路径模板**：输出路径和日志路径支持 `{{start}}`、`{{end}}`、`{{now}}` 等模板变量，自动替换为绝对时间。
+- **高内聚低耦合**：模块单向数据流 `config → fetcher → processor → mapper → highlight → reporter`，`MetricFetcher` trait 解耦数据源，`DeviceSpec` 数据化设备规则。
 
 ## 快速开始
 
@@ -52,8 +55,41 @@ gpu-npu-util-reporter [--config <path>] [--start "YYYY-MM-DD HH:MM:SS"] [--end "
 ```
 
 - `--config`：配置文件路径，默认 `./config.yaml`（不存在则生成默认）。
-- `--start` / `--end`：覆盖时间范围，**必须同时给或同时不给**（格式 `YYYY-MM-DD HH:MM:SS`）。
-- `--output`：覆盖输出 xlsx 路径。
+- `--start` / `--end`：覆盖时间范围，**必须同时给或同时不给**。支持绝对时间（`YYYY-MM-DD HH:MM:SS`）和相对时间表达式（见下文）。
+- `--output`：覆盖输出 xlsx 路径（支持模板变量）。
+
+### 相对时间表达式
+
+`--start` / `--end` 和配置文件中的 `time_range.start` / `time_range.end` 均支持相对时间表达式：
+
+```text
+语法：<锚点> [ (+|-) <数字><单位> ]
+锚点：now | start | end
+单位：y(年) | M(月) | d(天) | h(时) | m(分) | s(秒)
+```
+
+示例：
+- `now` — 当前时刻
+- `now-7d` — 7 天前
+- `end-7d` — 查询结束时间前 7 天
+- `start+3h` — 查询开始时间后 3 小时
+- `now-1d12h` — 1 天 12 小时前（复合偏移）
+
+### 路径模板
+
+`report.output_path` 和 `log.file_path` 支持以下模板变量，运行时替换为实际值：
+
+| 变量 | 替换结果 | 示例 |
+|------|----------|------|
+| `{{start}}` | 起始时间（完整） | `2026-06-18_00-00-00` |
+| `{{start_date}}` | 起始日期 | `2026-06-18` |
+| `{{start_time}}` | 起始时刻 | `00-00-00` |
+| `{{end}}` | 结束时间（完整） | `2026-06-19_00-00-00` |
+| `{{end_date}}` | 结束日期 | `2026-06-19` |
+| `{{end_time}}` | 结束时刻 | `00-00-00` |
+| `{{now}}` | 运行时刻（完整） | `2026-06-20_14-30-00` |
+| `{{now_date}}` | 运行日期 | `2026-06-20` |
+| `{{now_time}}` | 运行时刻 | `14-30-00` |
 
 ## 配置
 
@@ -61,8 +97,8 @@ gpu-npu-util-reporter [--config <path>] [--start "YYYY-MM-DD HH:MM:SS"] [--end "
 
 ```yaml
 time_range:
-  start: "2026-06-18 00:00:00"
-  end:   "2026-06-19 00:00:00"
+  start: "now-7d"          # 支持相对时间：now/start/end [+- N单位(y/M/d/h/m/s)]
+  end:   "now"              # 或绝对时间："2026-06-19 00:00:00"
 
 sources:
   - name: "prod-cluster"
@@ -73,9 +109,6 @@ sources:
 devices:
   nvidia_a10:    # 见上方表格；memory 用 composite_ratio
   ascend_910b:   # memory 用 direct_metric + composite_from_total fallback
-
-host_ip:
-  prefer_label: "ip"      # 取不到时从 instance 标签去端口解析
 
 ownership:
   mode: "last_in_range"   # 或 "instant"
@@ -104,6 +137,14 @@ thresholds:
   mem_peak_above:  null
   mem_peak_below:  null
 
+# 日志配置
+log:
+  console_level: "info"    # 控制台日志级别：trace/debug/info/warn/error
+  file_enabled: false      # 是否启用文件日志
+  file_level: "debug"      # 文件日志级别
+  file_path: "./logs/{{now}}.log"   # 支持模板变量
+
+# 报表输出（output_path 支持模板变量）
 report:
   output_path: "./utilization-report.xlsx"
   query_step_secs: 60
@@ -129,10 +170,14 @@ src/
 ├── config.rs      # YAML 解析、默认配置生成、CLI 覆盖
 ├── devices.rs     # 设备指标配方 DeviceSpec + A10/910B 预设
 ├── fetcher.rs     # MetricFetcher trait + Prometheus HTTP 实现
-├── processor.rs   # 时序聚合、HBM fallback、归属取值
+├── logging.rs     # 日志初始化（tracing，控制台+文件独立级别）
+├── pipeline.rs    # 采集编排、分组、归属取值
+├── processor.rs   # 时序聚合、HBM fallback
 ├── mapper.rs      # 资产表加载、@key join、列位置排布
 ├── highlight.rs   # 8 触发器阈值染色规则 + HEX 校验
 ├── reporter.rs    # Excel 渲染（样式 + 染色集成）
+├── template.rs    # 路径模板引擎（{{start}}, {{end}}, {{now}} 等）
+├── time_expr.rs   # 相对时间表达式解析（now-7d, start+3h 等）
 └── error.rs       # 统一错误类型 + 中文友好提示
 ```
 
@@ -141,7 +186,7 @@ src/
 ## 开发
 
 ```bash
-cargo test          # 71 个测试（70 单元 + 1 端到端渲染回读）
+cargo test          # 91 个测试（90 单元 + 1 端到端渲染回读）
 cargo clippy        # 零 warning
 ```
 

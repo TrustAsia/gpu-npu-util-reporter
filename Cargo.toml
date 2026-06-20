@@ -29,3 +29,6 @@ csv = "1"
 calamine = "0.26"
 rust_xlsxwriter = "0.79"
 async-trait = "0.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.5"

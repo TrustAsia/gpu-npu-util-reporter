@@ -67,9 +67,50 @@ fn default_mode() -> String {
     "last_in_range".into()
 }
 
+/// 日志配置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogConfig {
+    /// 控制台日志级别：trace/debug/info/warn/error
+    #[serde(default = "default_console_level")]
+    pub console_level: String,
+    /// 是否启用文件日志。
+    #[serde(default)]
+    pub file_enabled: bool,
+    /// 文件日志级别。
+    #[serde(default = "default_file_level")]
+    pub file_level: String,
+    /// 日志文件路径（支持模板变量 {{start}}, {{end}}, {{now}} 等）。
+    #[serde(default = "default_log_path")]
+    pub file_path: String,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            console_level: default_console_level(),
+            file_enabled: false,
+            file_level: default_file_level(),
+            file_path: default_log_path(),
+        }
+    }
+}
+
+fn default_console_level() -> String {
+    "info".into()
+}
+
+fn default_file_level() -> String {
+    "debug".into()
+}
+
+fn default_log_path() -> String {
+    "./logs/{{now}}.log".into()
+}
+
 /// 报表输出配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReportConfig {
+    /// 报表输出路径（支持模板变量 {{start}}, {{end}}, {{now}} 等）。
     pub output_path: String,
     #[serde(default = "default_step")]
     pub query_step_secs: u64,
@@ -94,6 +135,8 @@ pub struct AppConfig {
     pub mapping: Option<MappingConfig>,
     #[serde(default)]
     pub thresholds: ThresholdTriggers,
+    #[serde(default)]
+    pub log: LogConfig,
     pub report: ReportConfig,
 }
 
@@ -110,10 +153,11 @@ pub fn default_config_yaml() -> String {
     // 注：用 r##"..."## 原始字符串，因为模板内含 `"#`（如 color: "#FF0000"），
     // r#" 会在第一个 "# 处提前结束。r## 允许内容里出现单个 "#。
     const TEMPLATE: &str = r##"# === GPU/NPU 利用率监控 默认配置 ===
-# 时间范围（可被 --start/--end 覆盖），格式 YYYY-MM-DD HH:MM:SS
+# 时间范围（可被 --start/--end 覆盖）
+# 支持绝对时间（YYYY-MM-DD HH:MM:SS）或相对时间表达式（now/start/end [+- N单位]）
 time_range:
-  start: "2026-06-18 00:00:00"
-  end:   "2026-06-19 00:00:00"
+  start: "now-1d"
+  end:   "now"
 
 # Prometheus 数据源列表
 sources:
@@ -166,7 +210,19 @@ thresholds:
   mem_peak_above:    null
   mem_peak_below:    null
 
-# 报表输出
+# 日志配置
+# console_level: 控制台日志级别（trace/debug/info/warn/error）
+# file_enabled:  是否启用文件日志
+# file_level:    文件日志级别
+# file_path:     日志文件路径（支持模板：{{start}}, {{end}}, {{now}},
+#                {{start_date}}, {{end_date}}, {{now_date}} 等）
+log:
+  console_level: "info"
+  file_enabled: false
+  file_level: "debug"
+  file_path: "./logs/{{now}}.log"
+
+# 报表输出（output_path 支持模板变量，同 log.file_path）
 report:
   output_path: "./utilization-report.xlsx"
   query_step_secs: 60
@@ -252,6 +308,7 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
         }
     }
     // 校验时间范围逻辑：start 必须早于 end，否则 Prometheus 返回空数据。
+    // 如果两个值都是绝对时间，立即校验；含相对时间的表达式在运行时解析后校验。
     let start = NaiveDateTime::parse_from_str(&cfg.time_range.start, "%Y-%m-%d %H:%M:%S");
     let end = NaiveDateTime::parse_from_str(&cfg.time_range.end, "%Y-%m-%d %H:%M:%S");
     if let (Ok(s), Ok(e)) = (start, end) {
@@ -262,6 +319,15 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             });
         }
     }
+    // 校验时间字段：必须是绝对时间或合法的相对时间表达式
+    validate_time_or_expr(&cfg.time_range.start).map_err(|e| AppError::Config {
+        path: path.into(),
+        reason: format!("time_range.start：{e}"),
+    })?;
+    validate_time_or_expr(&cfg.time_range.end).map_err(|e| AppError::Config {
+        path: path.into(),
+        reason: format!("time_range.end：{e}"),
+    })?;
     // 校验设备配方中指标名/标签名的合法性，防止 PromQL 注入。
     // Prometheus 指标名: [a-zA-Z_:][a-zA-Z0-9_:]*
     // 标签名: [a-zA-Z_][a-zA-Z0-9_]*
@@ -417,20 +483,12 @@ fn is_valid_label_name(s: &str) -> bool {
 pub fn apply_overrides(mut cfg: AppConfig, ov: &CliOverrides) -> Result<AppConfig, AppError> {
     match (&ov.start, &ov.end) {
         (Some(s), Some(e)) => {
-            validate_time(s)?;
-            validate_time(e)?;
+            validate_time_or_expr(s)?;
+            validate_time_or_expr(e)?;
             // CLI 覆盖也需校验 start < end（配置文件的校验在 load_or_init 里，
             // 但 CLI 覆盖发生在之后，如果不重新校验会绕过约束）。
-            let st = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S");
-            let en = NaiveDateTime::parse_from_str(e, "%Y-%m-%d %H:%M:%S");
-            if let (Ok(st), Ok(en)) = (st, en) {
-                if st >= en {
-                    return Err(AppError::Config {
-                        path: "<cli>".into(),
-                        reason: "--start 必须早于 --end".into(),
-                    });
-                }
-            }
+            // 注意：相对时间表达式在 apply_overrides 阶段不解析，
+            // start < end 校验在 main 中解析绝对时间后进行。
             cfg.time_range.start.clone_from(s);
             cfg.time_range.end.clone_from(e);
         }
@@ -448,12 +506,21 @@ pub fn apply_overrides(mut cfg: AppConfig, ov: &CliOverrides) -> Result<AppConfi
     Ok(cfg)
 }
 
-/// 校验时间字符串格式。
-fn validate_time(s: &str) -> Result<(), AppError> {
-    use chrono::NaiveDateTime;
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-        .map_err(|_| AppError::TimeFormat { raw: s.into() })?;
-    Ok(())
+/// 校验时间字符串格式（绝对时间或相对时间表达式）。
+fn validate_time_or_expr(s: &str) -> Result<(), AppError> {
+    // 先尝试绝对时间
+    if NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").is_ok() {
+        return Ok(());
+    }
+    // 再检查是否为合法的相对时间表达式
+    if crate::time_expr::is_relative_time(s) {
+        return Ok(());
+    }
+    Err(AppError::TimeFormat {
+        raw: format!(
+            "「{s}」既不是绝对时间（YYYY-MM-DD HH:MM:SS）也不是相对时间表达式（now/start/end[+/-N单位]）"
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -503,8 +570,11 @@ mod tests {
 
     #[test]
     fn validate_time_rejects_bad_format() {
-        assert!(validate_time("2026/01/01 00:00:00").is_err());
-        assert!(validate_time("2026-01-01 00:00:00").is_ok());
+        assert!(validate_time_or_expr("2026/01/01 00:00:00").is_err());
+        assert!(validate_time_or_expr("2026-01-01 00:00:00").is_ok());
+        assert!(validate_time_or_expr("now-7d").is_ok());
+        assert!(validate_time_or_expr("start+3h").is_ok());
+        assert!(validate_time_or_expr("tomorrow").is_err());
     }
 
     #[test]
@@ -529,18 +599,35 @@ mod tests {
     }
 
     #[test]
-    fn apply_overrides_rejects_start_ge_end() {
+    fn apply_overrides_accepts_absolute_and_relative_times() {
+        // 绝对时间
         let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
-        let r = apply_overrides(
+        let out = apply_overrides(
             cfg,
             &CliOverrides {
-                start: Some("2026-06-19 00:00:00".into()),
-                end: Some("2026-06-18 00:00:00".into()),
+                start: Some("2026-01-01 00:00:00".into()),
+                end: Some("2026-01-02 00:00:00".into()),
                 config_path: None,
                 output: None,
             },
-        );
-        assert!(r.is_err(), "start >= end 应被拒绝");
+        )
+        .unwrap();
+        assert_eq!(out.time_range.start, "2026-01-01 00:00:00");
+
+        // 相对时间表达式
+        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let out = apply_overrides(
+            cfg,
+            &CliOverrides {
+                start: Some("now-7d".into()),
+                end: Some("now".into()),
+                config_path: None,
+                output: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.time_range.start, "now-7d");
+        assert_eq!(out.time_range.end, "now");
     }
 
     #[test]
