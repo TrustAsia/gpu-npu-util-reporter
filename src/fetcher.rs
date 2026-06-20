@@ -102,8 +102,8 @@ impl MetricFetcher for PrometheusFetcher {
             .get(&url)
             .query(&[
                 ("query", promql),
-                ("start", &start.timestamp().to_string()),
-                ("end", &end.timestamp().to_string()),
+                ("start", &start.to_rfc3339()),
+                ("end", &end.to_rfc3339()),
                 ("step", &step.num_seconds().to_string()),
             ])
             .timeout(self.timeout)
