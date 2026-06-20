@@ -30,7 +30,6 @@ struct QueryContext<'a> {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     step: Duration,
-    cfg: &'a AppConfig,
     out: &'a mut CollectOutcome,
 }
 
@@ -99,7 +98,6 @@ pub async fn collect_device(
         start,
         end,
         step,
-        cfg,
         out: &mut out,
     };
 
@@ -161,11 +159,11 @@ pub async fn collect_device(
     //    避免聚合数据丢失。槽位用 Option 互不覆写（I7 修复）。
     let mut groups: HashMap<String, (Option<Series>, Option<Series>)> = HashMap::new();
     for s in core_series {
-        let key = series_key(&s, ctx.spec, ctx.cfg);
+        let key = series_key(&s, ctx.spec);
         merge_into(&mut groups.entry(key).or_default().0, s);
     }
     for s in effective_mem {
-        let key = series_key(&s, ctx.spec, ctx.cfg);
+        let key = series_key(&s, ctx.spec);
         merge_into(&mut groups.entry(key).or_default().1, s);
     }
 
@@ -184,13 +182,13 @@ pub async fn collect_device(
         // 身份字段优先从 core 取，core 缺失则从 mem 取。
         let id_series = core.as_ref().or(mem.as_ref());
         let host_ip = id_series
-            .map(|s| extract_ip(&s.labels, &ctx.cfg.host_ip.prefer_label))
+            .map(|s| extract_ip(&s.labels, &ctx.spec.labels.host_ip))
             .unwrap_or_default();
         let card_id = id_series
             .and_then(|s| s.labels.get(&ctx.spec.card_id_label).cloned())
             .unwrap_or_default();
         let node_name = id_series
-            .and_then(|s| s.labels.get("node").cloned())
+            .and_then(|s| s.labels.get(&ctx.spec.labels.node_name).cloned())
             .unwrap_or_default();
 
         let (c_avg, c_peak, c_peak_t) = core
@@ -284,14 +282,14 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
     // 否则 HashMap::collect 会静默丢弃非末尾的 series，导致数据丢失。
     let mut total_by_key: HashMap<String, Option<Series>> = HashMap::new();
     for t in total_s {
-        let key = series_key(&t, ctx.spec, ctx.cfg);
+        let key = series_key(&t, ctx.spec);
         merge_into(total_by_key.entry(key).or_default(), t);
     }
 
     used_s
         .into_iter()
         .filter_map(|u| {
-            let key = series_key(&u, ctx.spec, ctx.cfg);
+            let key = series_key(&u, ctx.spec);
             total_by_key
                 .get(&key)
                 .and_then(|opt| opt.as_ref())
@@ -420,8 +418,8 @@ fn stat3(points: &[(DateTime<Utc>, f64)]) -> (Option<f64>, Option<f64>, Option<D
 }
 
 /// 序列分组 `key`：`host_ip` + `card_id`（C3 join 也复用此 key）。
-pub(crate) fn series_key(s: &Series, spec: &DeviceSpec, cfg: &AppConfig) -> String {
-    let ip = extract_ip(&s.labels, &cfg.host_ip.prefer_label);
+pub(crate) fn series_key(s: &Series, spec: &DeviceSpec) -> String {
+    let ip = extract_ip(&s.labels, &spec.labels.host_ip);
     let card = s
         .labels
         .get(&spec.card_id_label)
@@ -430,7 +428,7 @@ pub(crate) fn series_key(s: &Series, spec: &DeviceSpec, cfg: &AppConfig) -> Stri
     format!("{ip}|{card}")
 }
 
-/// 从标签取主机 IP：优先 `prefer_label`，否则 instance 去端口。
+/// 从标签取主机 IP：优先指定标签名，否则 instance 去端口。
 pub(crate) fn extract_ip(labels: &HashMap<String, String>, prefer: &str) -> String {
     if let Some(v) = labels.get(prefer) {
         if !v.is_empty() {
@@ -505,6 +503,8 @@ mod tests {
             memory: MemoryStrategy::composite_ratio("U", "F"),
             card_id_label: "gpu".into(),
             labels: crate::devices::LabelMapping {
+                host_ip: "ip".into(),
+                node_name: "node".into(),
                 container: "c".into(),
                 pod: "p".into(),
                 namespace: "n".into(),
@@ -938,5 +938,99 @@ mod tests {
             ("instance".into(), "2001:db8::1".into()),
         ]);
         assert_eq!(extract_ip(&labels, "ip"), "2001:db8::1");
+    }
+
+    // ---- node_name / host_ip 从 DeviceSpec.labels 取 ----
+
+    #[tokio::test]
+    async fn node_name_uses_label_from_spec() {
+        // 验证 node_name 取自 spec.labels.node_name 指定的标签名，
+        // 而非硬编码的 "node"。
+        let core = vec![Series {
+            labels: labels(&[
+                ("gpu", "0"),
+                ("ip", "1.1.1.1"),
+                ("nodename", "my-node"), // 非标准 "node" 标签名
+            ]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let mem = vec![Series {
+            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1")]),
+            points: vec![(t(0), 20.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
+            .when(" / (", Ok(mem));
+        let mut spec = crate::devices::nvidia_a10_spec();
+        spec.labels.node_name = "nodename".into(); // 配置为 "nodename" 而非默认 "node"
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        let r = &out.records[0];
+        assert_eq!(r.node_name, "my-node", "node_name 应取自 spec.labels.node_name 指定的标签");
+    }
+
+    #[tokio::test]
+    async fn host_ip_uses_label_from_spec() {
+        // 验证 host_ip 取自 spec.labels.host_ip 指定的标签名，
+        // 而非顶层 cfg.host_ip.prefer_label。
+        let core = vec![Series {
+            labels: labels(&[
+                ("gpu", "0"),
+                ("host_address", "10.0.0.5"), // 非标准 "ip" 标签名
+                ("node", "n1"),
+            ]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core));
+        let mut spec = crate::devices::nvidia_a10_spec();
+        spec.labels.host_ip = "host_address".into(); // 配置为 "host_address"
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        let r = &out.records[0];
+        assert_eq!(r.host_ip, "10.0.0.5", "host_ip 应取自 spec.labels.host_ip 指定的标签");
+    }
+
+    #[tokio::test]
+    async fn node_name_empty_when_label_missing() {
+        // 当标签中不存在 spec.labels.node_name 指定的键时，node_name 应为空串。
+        let core = vec![Series {
+            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1")]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core));
+        let spec = crate::devices::nvidia_a10_spec(); // labels.node_name = "node"
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        let r = &out.records[0];
+        assert_eq!(r.node_name, "", "标签中无 node 键时 node_name 应为空串");
     }
 }

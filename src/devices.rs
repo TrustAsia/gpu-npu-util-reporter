@@ -9,8 +9,14 @@ use serde::{Deserialize, Serialize};
 /// 标签名映射：把统一的逻辑归属字段映射到各 exporter 实际使用的标签名。
 ///
 /// 例如 NPU 用 `container_name`/`pod_name`，DCGM 常用 `container`/`pod`。
+/// `host_ip` 和 `node_name` 也在此配置，因为不同 exporter 使用的标签名不同
+/// （如 DCGM 常用 `ip`，NPU 可能用 `host_ip`；节点名可能是 `node` 或 `nodename`）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LabelMapping {
+    /// 主机 IP 标签名（优先取此标签，取不到时从 instance 标签去端口解析）。
+    pub host_ip: String,
+    /// 节点名称标签名。
+    pub node_name: String,
     /// 容器标签名。
     pub container: String,
     /// Pod 标签名。
@@ -146,6 +152,8 @@ pub fn nvidia_a10_spec() -> DeviceSpec {
         memory: MemoryStrategy::composite_ratio("DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"),
         card_id_label: "gpu".into(),
         labels: LabelMapping {
+            host_ip: "ip".into(),
+            node_name: "node".into(),
             container: "container".into(),
             pod: "pod".into(),
             namespace: "namespace".into(),
@@ -171,6 +179,8 @@ pub fn ascend_910b_spec() -> DeviceSpec {
         ),
         card_id_label: "id".into(),
         labels: LabelMapping {
+            host_ip: "ip".into(),
+            node_name: "node".into(),
             container: "container_name".into(),
             pod: "pod_name".into(),
             namespace: "namespace".into(),

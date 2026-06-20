@@ -45,15 +45,15 @@ const fn default_timeout() -> u64 {
     30
 }
 
-/// 主机 IP 取值策略：优先标签，instance 兜底。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// 主机 IP 取值策略：优先指定标签，instance 兜底。
+///
+/// 注：主机 IP 标签名现已纳入各设备配方的 `labels.host_ip` 字段，
+/// 不再需要独立的 `host_ip` 配置块。此结构体仅用于从旧配置文件
+/// 向后兼容反序列化（忽略即可）。新增设备类型时直接在 `labels` 里配置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct HostIpConfig {
-    #[serde(default = "default_prefer_label")]
+    #[serde(default)]
     pub prefer_label: String,
-}
-
-fn default_prefer_label() -> String {
-    "ip".into()
 }
 
 /// 归属取值模式。
@@ -85,6 +85,9 @@ pub struct AppConfig {
     pub time_range: TimeRangeConfig,
     pub sources: Vec<SourceConfig>,
     pub devices: HashMap<String, DeviceSpec>,
+    /// 向后兼容：旧配置文件中的 `host_ip` 块。主机 IP 标签名现已纳入
+    /// 各设备配方的 `labels.host_ip` 字段，此字段仅用于旧配置反序列化不报错。
+    #[serde(default)]
     pub host_ip: HostIpConfig,
     pub ownership: OwnershipConfig,
     #[serde(default)]
@@ -127,9 +130,8 @@ __NVIDIA__
   ascend_910b:
 __ASCEND__
 
-# 主机 IP 取值（标签优先，instance 兜底）
-host_ip:
-  prefer_label: "ip"
+# 主机 IP 取值已纳入各设备配方的 labels.host_ip 字段
+# （优先取该标签，取不到时从 instance 标签去端口解析）
 
 # 归属取值模式：instant 或 last_in_range
 ownership:
