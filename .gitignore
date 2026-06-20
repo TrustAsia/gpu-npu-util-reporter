@@ -1,3 +1,42 @@
+# Build
 /target/
 **/*.rs.bk
+
+# macOS
 .DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+.directory
+
+# Editor / IDE
+*.swp
+*.swo
+*.tmp
+.idea/
+.vscode/
+*.code-workspace
+.fleet/
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+*.log
+
+# Runtime artifacts
+config.yaml
+*.xlsx
+!npu-exporter.xlsx

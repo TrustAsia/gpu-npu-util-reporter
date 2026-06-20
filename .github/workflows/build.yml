@@ -197,14 +197,19 @@ jobs:
           VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Check if tag already exists
-        id: check_tag
+      - name: Determine release tag
+        id: tag
         run: |
-          if git tag -l "v${{ steps.version.outputs.version }}" | grep -q .; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          if git tag -l "v${VERSION}" | grep -q .; then
+            TAG="v${VERSION}+${SHORT_SHA}"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            TAG="v${VERSION}"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog
         id: changelog
@@ -215,7 +220,6 @@ jobs:
           else
             LOG=$(git log --pretty=format:"- %s (%h)" --no-merges -20)
           fi
-          # 多行输出需要特殊处理
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "log<<${EOF}" >> "$GITHUB_OUTPUT"
           echo "$LOG" >> "$GITHUB_OUTPUT"
@@ -224,8 +228,8 @@ jobs:
       - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
           body: |
             ## Changes
 
@@ -242,4 +246,4 @@ jobs:
             | `gpu-npu-util-reporter-aarch64-apple-darwin` | macOS Apple Silicon |
           files: artifacts/*
           draft: false
-          prerelease: ${{ steps.check_tag.outputs.exists == 'false' && startsWith(steps.version.outputs.version, '0.') }}
+          prerelease: ${{ steps.tag.outputs.prerelease }}
