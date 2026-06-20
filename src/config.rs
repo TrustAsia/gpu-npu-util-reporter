@@ -231,6 +231,23 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             reason: "sources[].timeout_secs 必须 > 0".into(),
         });
     }
+    if cfg.sources.is_empty() {
+        return Err(AppError::Config {
+            path: path.into(),
+            reason: "sources 不能为空".into(),
+        });
+    }
+    for src in &cfg.sources {
+        if !src.url.starts_with("http://") && !src.url.starts_with("https://") {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "数据源「{}」的 url 必须以 http:// 或 https:// 开头（当前：{}）",
+                    src.name, src.url
+                ),
+            });
+        }
+    }
     // 校验时间范围逻辑：start 必须早于 end，否则 Prometheus 返回空数据。
     let start = NaiveDateTime::parse_from_str(&cfg.time_range.start, "%Y-%m-%d %H:%M:%S");
     let end = NaiveDateTime::parse_from_str(&cfg.time_range.end, "%Y-%m-%d %H:%M:%S");
@@ -392,5 +409,22 @@ mod tests {
         let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.report.query_step_secs = u64::MAX;
         assert!(validate_config(&cfg, "test.yaml").is_err(), "超大 query_step_secs 应被拒绝");
+    }
+
+    #[test]
+    fn config_rejects_empty_sources() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources.clear();
+        assert!(validate_config(&cfg, "test.yaml").is_err(), "空 sources 应被拒绝");
+    }
+
+    #[test]
+    fn config_rejects_url_without_scheme() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].url = "192.168.1.100:9090".into();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "无协议前缀的 URL 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("http://") || msg.contains("https://"), "提示应含协议要求");
     }
 }
