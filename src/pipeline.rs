@@ -319,19 +319,20 @@ async fn ownership_for(
         // 先尝试从 core 取归属标签；若 core 缺失或归属字段为空，则回退到 mem。
         let core_labels = core.map(|c| &c.labels);
         let mem_labels = mem.map(|m| &m.labels);
-        let labels = if let Some(cl) = core_labels {
-            // core 存在但归属字段可能为空，回退到 mem
-            let ns = cl.get(&ctx.spec.labels.namespace).map_or("", String::as_str);
-            if ns.is_empty() {
-                mem_labels
-            } else {
-                Some(cl)
+        // 逐字段回退：core 有值用 core，否则从 mem 取。
+        let get = |k: &str| -> String {
+            if let Some(cl) = core_labels {
+                if let Some(v) = cl.get(k) {
+                    if !v.is_empty() {
+                        return v.clone();
+                    }
+                }
             }
-        } else {
             mem_labels
+                .and_then(|m| m.get(k))
+                .cloned()
+                .unwrap_or_default()
         };
-        let get =
-            |k: &str| -> String { labels.and_then(|m| m.get(k)).cloned().unwrap_or_default() };
         return (
             get(&ctx.spec.labels.namespace),
             get(&ctx.spec.labels.pod),
@@ -823,6 +824,49 @@ mod tests {
         assert_eq!(r.namespace, "ns-mem", "core 无归属时应从 mem 取 namespace");
         assert_eq!(r.pod, "pod-mem");
         assert_eq!(r.container, "c-mem");
+    }
+
+    #[tokio::test]
+    async fn instant_mode_partial_fallback_per_field() {
+        // core 有 namespace 但缺 pod/container，mem 有全部归属字段 →
+        // namespace 从 core 取，pod/container 从 mem 取（逐字段回退）。
+        let core = vec![Series {
+            labels: labels(&[
+                ("gpu", "0"),
+                ("ip", "1.1.1.1"),
+                ("namespace", "ns-core"),
+            ]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let mem = vec![Series {
+            labels: labels(&[
+                ("gpu", "0"),
+                ("ip", "1.1.1.1"),
+                ("namespace", "ns-mem"),
+                ("pod", "pod-mem"),
+                ("container", "c-mem"),
+            ]),
+            points: vec![(t(0), 20.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
+            .when(" / (", Ok(mem));
+        let spec = crate::devices::nvidia_a10_spec();
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        let r = &out.records[0];
+        assert_eq!(r.namespace, "ns-core", "core 有 namespace 应从 core 取");
+        assert_eq!(r.pod, "pod-mem", "core 无 pod 应从 mem 回退");
+        assert_eq!(r.container, "c-mem", "core 无 container 应从 mem 回退");
     }
 
     // ---- last_in_range 模式：核心无数据时回退到显存指标查归属 ----

@@ -108,6 +108,11 @@ impl MetricFetcher for PrometheusFetcher {
                 url: self.base_url.clone(),
                 detail: format!("连接失败：{e}"),
             })?;
+        let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
+            source_name: self.source_name.clone(),
+            url: self.base_url.clone(),
+            detail: format!("HTTP 请求失败：{e}"),
+        })?;
         let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
             source_name: self.source_name.clone(),
             url: self.base_url.clone(),
@@ -130,6 +135,11 @@ impl MetricFetcher for PrometheusFetcher {
                 url: self.base_url.clone(),
                 detail: format!("连接失败：{e}"),
             })?;
+        let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
+            source_name: self.source_name.clone(),
+            url: self.base_url.clone(),
+            detail: format!("HTTP 请求失败：{e}"),
+        })?;
         let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
             source_name: self.source_name.clone(),
             url: self.base_url.clone(),
