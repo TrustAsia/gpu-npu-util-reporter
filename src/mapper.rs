@@ -192,7 +192,8 @@ pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Ve
 }
 
 /// 加载资产表，并为每行注入 `@key`（由 `match_keys` 指定的列拼成）。
-/// 按扩展名分流：`.csv` 用 csv crate，`.xlsx`/`.xls` 用 calamine。首行视为表头。
+/// 按扩展名分流：`.csv` 用 csv crate，`.xlsx`/`.xls`/`.xlsb`/`.ods` 用 calamine 自动检测。
+/// 首行视为表头。
 ///
 /// # Errors
 ///
@@ -205,12 +206,12 @@ pub fn load_asset_table(path: &str, match_keys: &[MatchKey]) -> Result<Vec<Asset
         .to_ascii_lowercase();
     if ext == "csv" {
         load_csv(path, match_keys)
-    } else if ext == "xlsx" || ext == "xls" {
-        load_xlsx(path, match_keys)
+    } else if matches!(ext.as_str(), "xlsx" | "xls" | "xlsb" | "ods") {
+        load_excel(path, match_keys)
     } else {
         Err(AppError::Mapping {
             path: path.into(),
-            detail: "不支持的资产表格式（仅支持 .csv/.xlsx）".into(),
+            detail: "不支持的资产表格式（仅支持 .csv/.xlsx/.xls/.xlsb/.ods）".into(),
         })
     }
 }
@@ -250,9 +251,9 @@ fn load_csv(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppErr
     Ok(rows)
 }
 
-fn load_xlsx(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppError> {
-    use calamine::{open_workbook, Reader, Xlsx};
-    let mut book: Xlsx<_> = open_workbook(path).map_err(|e| AppError::Mapping {
+fn load_excel(path: &str, match_keys: &[MatchKey]) -> Result<Vec<AssetRow>, AppError> {
+    use calamine::{open_workbook_auto, Reader, Sheets};
+    let mut book: Sheets<_> = open_workbook_auto(path).map_err(|e| AppError::Mapping {
         path: path.into(),
         detail: format!("打开 Excel 失败：{e}"),
     })?;
