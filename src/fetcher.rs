@@ -87,9 +87,79 @@ enum PromResult {
     },
 }
 
+/// Prometheus 默认单次 query_range 最大数据点数（`--query.max-samples` 默认值）。
+/// 超出此限制会返回 `bad_data: exceeded maximum resolution`。
+const PROM_MAX_POINTS: i64 = 11_000;
+
 #[async_trait]
 impl MetricFetcher for PrometheusFetcher {
     async fn query_range(
+        &self,
+        promql: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        step: Duration,
+    ) -> Result<Vec<Series>, AppError> {
+        let step_secs = step.num_seconds().max(1);
+        let range_secs = (end - start).num_seconds().max(1);
+        let estimated_points = range_secs / step_secs;
+
+        if estimated_points <= PROM_MAX_POINTS {
+            // 单次查询不超限，直接请求
+            return self.query_range_single(promql, start, end, step).await;
+        }
+
+        // 分段：每段最多 PROM_MAX_POINTS 个点，段长 = step * PROM_MAX_POINTS
+        let segment_secs = step_secs * PROM_MAX_POINTS;
+        let num_segments = (range_secs + segment_secs - 1) / segment_secs; // ceil
+
+        let mut all_series: Vec<Series> = Vec::new();
+        let mut seg_start = start;
+        for i in 0..num_segments {
+            let seg_end = if i == num_segments - 1 {
+                end
+            } else {
+                (seg_start + Duration::seconds(segment_secs)).min(end)
+            };
+            match self.query_range_single(promql, seg_start, seg_end, step).await {
+                Ok(segments) => {
+                    merge_series(&mut all_series, segments);
+                }
+                Err(e) => return Err(e), // 任一段失败即整体失败
+            }
+            seg_start = seg_end;
+        }
+        Ok(all_series)
+    }
+
+    async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError> {
+        let url = format!("{}/api/v1/query", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("query", promql)])
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| AppError::Prometheus {
+                source_name: self.source_name.clone(),
+                url: self.base_url.clone(),
+                detail: format!("连接失败：{e}"),
+            })?;
+        let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
+            source_name: self.source_name.clone(),
+            url: self.base_url.clone(),
+            detail: format!("HTTP 请求失败：{e}"),
+        })?;
+        let data: PromResponse =
+            read_limited_json(resp, &self.source_name, &self.base_url).await?;
+        parse_response(data, &self.source_name)
+    }
+}
+
+impl PrometheusFetcher {
+    /// 单次 query_range HTTP 请求（不分段）。
+    async fn query_range_single(
         &self,
         promql: &str,
         start: DateTime<Utc>,
@@ -123,29 +193,22 @@ impl MetricFetcher for PrometheusFetcher {
             read_limited_json(resp, &self.source_name, &self.base_url).await?;
         parse_response(data, &self.source_name)
     }
+}
 
-    async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError> {
-        let url = format!("{}/api/v1/query", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .client
-            .get(&url)
-            .query(&[("query", promql)])
-            .timeout(self.timeout)
-            .send()
-            .await
-            .map_err(|e| AppError::Prometheus {
-                source_name: self.source_name.clone(),
-                url: self.base_url.clone(),
-                detail: format!("连接失败：{e}"),
-            })?;
-        let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
-            source_name: self.source_name.clone(),
-            url: self.base_url.clone(),
-            detail: format!("HTTP 请求失败：{e}"),
-        })?;
-        let data: PromResponse =
-            read_limited_json(resp, &self.source_name, &self.base_url).await?;
-        parse_response(data, &self.source_name)
+/// 把分段查询返回的 series 合并进 `all_series`。
+///
+/// 按 labels 匹配：同一标签集的 series 合并点并按时间戳排序去重；
+/// 不同标签集的 series 直接追加。
+fn merge_series(all_series: &mut Vec<Series>, incoming: Vec<Series>) {
+    for s in incoming {
+        // 查找已有 series 中是否有完全相同的标签集
+        if let Some(existing) = all_series.iter_mut().find(|e| e.labels == s.labels) {
+            existing.points.extend(s.points);
+            existing.points.sort_by_key(|(ts, _)| *ts);
+            existing.points.dedup_by(|a, b| a.0 == b.0);
+        } else {
+            all_series.push(s);
+        }
     }
 }
 
@@ -458,5 +521,47 @@ mod tests {
         let s = parse_response(resp, "src").unwrap();
         assert_eq!(s.len(), 1, "NaN 的 Vector 应被过滤");
         assert_eq!(s[0].labels["gpu"], "1");
+    }
+
+    #[test]
+    fn merge_series_combines_same_labels() {
+        use chrono::TimeZone;
+        fn t(secs: i64) -> DateTime<Utc> {
+            Utc.timestamp_opt(secs, 0).unwrap()
+        }
+        let mut all: Vec<Series> = vec![Series {
+            labels: HashMap::from([("gpu".into(), "0".into())]),
+            points: vec![(t(0), 10.0), (t(60), 20.0)],
+        }];
+        let incoming = vec![Series {
+            labels: HashMap::from([("gpu".into(), "0".into())]),
+            points: vec![(t(120), 30.0), (t(60), 99.0)], // t60 重叠，t120 新增
+        }];
+        merge_series(&mut all, incoming);
+        assert_eq!(all.len(), 1, "同标签应合并为 1 条 series");
+        let pts = &all[0].points;
+        assert_eq!(pts.len(), 3, "去重后应 3 个点");
+        // dedup_by 保留首个（排序后 t60 的第一个值），所以 t60=20.0
+        assert_eq!(pts[0], (t(0), 10.0));
+        assert_eq!(pts[1], (t(60), 20.0));
+        assert_eq!(pts[2], (t(120), 30.0));
+    }
+
+    #[test]
+    fn merge_series_appends_different_labels() {
+        use chrono::TimeZone;
+        fn t(secs: i64) -> DateTime<Utc> {
+            Utc.timestamp_opt(secs, 0).unwrap()
+        }
+        let mut all: Vec<Series> = vec![Series {
+            labels: HashMap::from([("gpu".into(), "0".into())]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let incoming = vec![Series {
+            labels: HashMap::from([("gpu".into(), "1".into())]),
+            points: vec![(t(0), 50.0)],
+        }];
+        merge_series(&mut all, incoming);
+        assert_eq!(all.len(), 2, "不同标签应追加为独立 series");
     }
 }

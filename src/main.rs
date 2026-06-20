@@ -140,25 +140,11 @@ async fn main() -> ExitCode {
         info!("日志文件路径：{log_file_path}");
     }
 
-    let mut step = Duration::try_seconds(cfg.report.query_step_secs.cast_signed())
+    let step = Duration::try_seconds(cfg.report.query_step_secs.cast_signed())
         .unwrap_or_else(|| {
             error!("query_step_secs 过大（{}），使用默认 60 秒", cfg.report.query_step_secs);
             Duration::seconds(60)
         });
-
-    // 自动上调 step：Prometheus 默认 11000 点上限，超出会返回 400 bad_data。
-    // 如果用户配置的 step 会导致超限，自动上调到安全值并警告。
-    const PROM_MAX_POINTS: i64 = 11_000;
-    let range_secs = (end - start).num_seconds().max(1);
-    let min_step_secs = (range_secs + PROM_MAX_POINTS - 1) / PROM_MAX_POINTS; // ceil
-    if step.num_seconds() < min_step_secs {
-        let old = step.num_seconds();
-        step = Duration::seconds(min_step_secs);
-        warn!(
-            "query_step_secs={old}s 在当前时间范围内会产生超过 {PROM_MAX_POINTS} 个数据点，已自动上调为 {min_step_secs}s（约 {:.1} 分钟）",
-            min_step_secs as f64 / 60.0
-        );
-    }
 
     // 5. 采集 + 聚合（单源/单卡失败 → Warning，不中断）
     let mut warnings: Vec<String> = Vec::new();
