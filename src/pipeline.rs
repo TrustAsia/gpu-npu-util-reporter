@@ -439,10 +439,20 @@ pub(crate) fn extract_ip(labels: &HashMap<String, String>, prefer: &str) -> Stri
     labels
         .get("instance")
         .map(|s| {
-            // 剥端口：仅当末尾是 :<纯数字> 时剥；兼容 IPv6（含 [::1]:9090 与裸 ::1）。
+            // 剥端口：仅当末尾是 :<纯数字> 且 host 部分看起来像 IPv4 或
+            // 方括号 IPv6 时才剥。裸 IPv6（如 "2001:db8::1"）的 rsplit_once(':')
+            // 会误把末段当端口，需排除。
             if let Some((host, port)) = s.rsplit_once(':') {
-                if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
-                    return host.to_string();
+                if !port.is_empty()
+                    && port.chars().all(|c| c.is_ascii_digit())
+                    && (host.starts_with('[') || host.contains('.'))
+                {
+                    // 剥 IPv6 方括号：[::1]:9090 → ::1
+                    return host
+                        .strip_prefix('[')
+                        .and_then(|h| h.strip_suffix(']'))
+                        .unwrap_or(host)
+                        .to_string();
                 }
             }
             s.clone()
@@ -857,5 +867,32 @@ mod tests {
         assert_eq!(r.namespace, "ns-mem", "last_in_range 应从显存指标取归属");
         assert_eq!(r.pod, "pod-mem");
         assert_eq!(r.container, "c-mem");
+    }
+
+    // ---- extract_ip IPv6 方括号 ----
+
+    #[test]
+    fn extract_ip_strips_ipv6_brackets() {
+        let labels = HashMap::from([
+            ("instance".into(), "[::1]:9090".into()),
+        ]);
+        assert_eq!(extract_ip(&labels, "ip"), "::1", "应剥去 IPv6 方括号");
+    }
+
+    #[test]
+    fn extract_ip_strips_ipv6_full_brackets() {
+        let labels = HashMap::from([
+            ("instance".into(), "[2001:db8::1]:9090".into()),
+        ]);
+        assert_eq!(extract_ip(&labels, "ip"), "2001:db8::1");
+    }
+
+    #[test]
+    fn extract_ip_bare_ipv6_no_port_unchanged() {
+        // 裸 IPv6 无端口 → rsplit_once(':') 后 port 含非数字 → 不剥，原样返回
+        let labels = HashMap::from([
+            ("instance".into(), "2001:db8::1".into()),
+        ]);
+        assert_eq!(extract_ip(&labels, "ip"), "2001:db8::1");
     }
 }

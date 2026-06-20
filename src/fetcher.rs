@@ -169,10 +169,12 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
                         }
                     }
                 }
-                out.push(Series {
-                    labels: metric,
-                    points,
-                });
+                if !points.is_empty() {
+                    out.push(Series {
+                        labels: metric,
+                        points,
+                    });
+                }
             }
             PromResult::Vector { metric, value } => {
                 if let Ok(v) = value.1.parse::<f64>() {
@@ -321,5 +323,27 @@ mod tests {
         assert_eq!(s[0].points.len(), 2, "NaN/+Inf 应被过滤");
         assert!((s[0].points[0].1 - 50.0).abs() < 1e-9);
         assert!((s[0].points[1].1 - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_matrix_all_nan_produces_no_series() {
+        // 当 Matrix 所有值均为 NaN/Inf 时，不应产生空 points 的 Series，
+        // 否则下游 is_empty() 判断会认为有数据而阻断 fallback。
+        let resp = PromResponse {
+            status: "success".into(),
+            error: None,
+            data: Some(PromData {
+                result: vec![PromResult::Matrix {
+                    metric: HashMap::from([("gpu".into(), "0".into())]),
+                    values: vec![
+                        (1000.0, "NaN".into()),
+                        (1060.0, "+Inf".into()),
+                        (1120.0, "-Inf".into()),
+                    ],
+                }],
+            }),
+        };
+        let s = parse_response(resp, "src").unwrap();
+        assert!(s.is_empty(), "全 NaN/Inf 的 Matrix 不应产生空 Series");
     }
 }
