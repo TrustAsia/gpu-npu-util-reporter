@@ -37,6 +37,7 @@ pub const BASE_COLUMNS: &[&str] = &[
 /// serde 表示为一个对象 `{ direction: before|after, anchor: <列名> }`，
 /// 而非外部标记枚举——因为 `serde_yaml` 不支持默认的 externally-tagged 变体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct InsertPosition {
     /// 方向：`before` 或 `after`。
     pub direction: Direction,
@@ -73,6 +74,7 @@ impl InsertPosition {
 
 /// 单个映射列的配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MappingColumn {
     /// 资产表源列名。
     pub source_field: String,
@@ -93,6 +95,7 @@ pub enum MatchKey {
 
 /// 资产映射总配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MappingConfig {
     pub enabled: bool,
     /// 资产表路径（按扩展名分流 CSV/Excel）。

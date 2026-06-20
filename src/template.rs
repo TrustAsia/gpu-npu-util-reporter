@@ -7,7 +7,6 @@
 //! - `{{start}}` / `{{start_date}}` / `{{start_time}}` — 查询起始时间
 //! - `{{end}}` / `{{end_date}}` / `{{end_time}}` — 查询结束时间
 //! - `{{now}}` / `{{now_date}}` / `{{now_time}}` — 当前运行时刻
-//! - `{{source}}` — 数据源别名（仅在单源场景有意义）
 //!
 //! 日期格式 `YYYY-MM-DD`，时间格式 `HH-MM-SS`（用 `-` 避免文件名中 `:` 在
 //! Windows 上非法），完整时间格式 `YYYY-MM-DD_HH-MM-SS`。

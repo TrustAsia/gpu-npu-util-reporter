@@ -24,6 +24,7 @@ pub struct CliOverrides {
 
 /// 时间范围配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TimeRangeConfig {
     pub start: String,
     pub end: String,
@@ -31,6 +32,7 @@ pub struct TimeRangeConfig {
 
 /// 单个 Prometheus 数据源。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     /// 别名，写入"数据来源"列。
     pub name: String,
@@ -58,6 +60,7 @@ pub struct HostIpConfig {
 
 /// 归属取值模式。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct OwnershipConfig {
     #[serde(default = "default_mode")]
     pub mode: String, // "instant" | "last_in_range"
@@ -69,6 +72,7 @@ fn default_mode() -> String {
 
 /// 日志配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LogConfig {
     /// 控制台日志级别：trace/debug/info/warn/error
     #[serde(default = "default_console_level")]
@@ -109,6 +113,7 @@ fn default_log_path() -> String {
 
 /// 报表输出配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReportConfig {
     /// 报表输出路径（支持模板变量 {{start}}, {{end}}, {{now}} 等）。
     pub output_path: String,
@@ -122,6 +127,7 @@ const fn default_step() -> u64 {
 
 /// 应用顶层配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub time_range: TimeRangeConfig,
     pub sources: Vec<SourceConfig>,
@@ -575,6 +581,9 @@ mod tests {
         assert!(validate_time_or_expr("now-7d").is_ok());
         assert!(validate_time_or_expr("start+3h").is_ok());
         assert!(validate_time_or_expr("tomorrow").is_err());
+        // is_relative_time 严格检查：锚点后跟非偏移字符不应通过
+        assert!(validate_time_or_expr("nowhere").is_err());
+        assert!(validate_time_or_expr("starting_point").is_err());
     }
 
     #[test]

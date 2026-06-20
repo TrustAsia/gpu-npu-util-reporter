@@ -1,4 +1,4 @@
-//! 端到端渲染集成测试：构造一条 `CardRecord` + 命中阈值触发器，渲染为 xlsx
+//! 端到端渲染集成测试：构造 `CardRecord` + 命中阈值触发器，渲染为 xlsx
 //! 字节缓冲，用 calamine 读回断言行数。
 //!
 //! 注：calamine 0.26 稳定 API 不暴露单元格填充色，因此"染色命中"由
@@ -8,7 +8,7 @@ use calamine::{open_workbook_from_rs, Reader, Xlsx};
 use chrono::TimeZone;
 use chrono::Utc;
 use gpu_npu_util_reporter::highlight::{HexColor, ThresholdTriggers, TriggerConfig};
-use gpu_npu_util_reporter::mapper::BASE_COLUMNS;
+use gpu_npu_util_reporter::mapper::{Direction, InsertPosition, MappingColumn, BASE_COLUMNS};
 use gpu_npu_util_reporter::processor::CardRecord;
 use gpu_npu_util_reporter::reporter::{render_to_buffer, ReportSpec};
 use std::collections::HashMap;
@@ -54,4 +54,65 @@ fn renders_report_with_highlight_and_reads_back() {
     let range = r.worksheet_range(&name).unwrap();
     assert_eq!(range.height(), 2, "1 表头 + 1 数据行");
     assert_eq!(range.width(), BASE_COLUMNS.len(), "列数应为基础列数");
+}
+
+#[test]
+fn renders_report_with_mapping_columns() {
+    let rec = CardRecord {
+        source_name: "prod".into(),
+        host_ip: "1.1.1.1".into(),
+        node_name: "node-1".into(),
+        card_id: "0".into(),
+        device_type: "NVIDIA A10".into(),
+        namespace: "default".into(),
+        pod: "p1".into(),
+        container: "c1".into(),
+        core_avg: Some(90.0),
+        core_peak: Some(99.0),
+        core_peak_time: Some(Utc.timestamp_opt(1000, 0).unwrap()),
+        mem_avg: Some(20.0),
+        mem_peak: Some(25.0),
+        mem_peak_time: Some(Utc.timestamp_opt(1060, 0).unwrap()),
+        range_start: Utc.timestamp_opt(0, 0).unwrap(),
+        range_end: Utc.timestamp_opt(2000, 0).unwrap(),
+    };
+    let mapping_columns = vec![MappingColumn {
+        source_field: "机房位置".into(),
+        rename: "机房".into(),
+        position: InsertPosition {
+            direction: Direction::After,
+            anchor: "主机IP".into(),
+        },
+    }];
+    let mapping_renames: Vec<String> = mapping_columns.iter().map(|c| c.rename.clone()).collect();
+
+    // 行 0 的"机房"列有值
+    let mut mapping_values: HashMap<(usize, String), String> = HashMap::new();
+    mapping_values.insert((0, "机房".into()), "北京A区".into());
+
+    let spec = ReportSpec {
+        base_columns: BASE_COLUMNS.iter().map(ToString::to_string).collect(),
+        mapping_renames,
+    };
+    let buf = render_to_buffer(
+        &[rec],
+        &spec,
+        &mapping_columns,
+        &ThresholdTriggers::default(),
+        &mapping_values,
+    )
+    .unwrap();
+    assert!(buf.len() > 1000, "应生成非空 xlsx 字节");
+
+    // 用 calamine 读回验证列数和内容
+    let mut r: Xlsx<_> = open_workbook_from_rs(std::io::Cursor::new(buf)).unwrap();
+    let name = r.sheet_names()[0].clone();
+    let range = r.worksheet_range(&name).unwrap();
+    // 基础列 + 1 映射列
+    assert_eq!(
+        range.width(),
+        BASE_COLUMNS.len() + 1,
+        "列数应为基础列 + 1 映射列"
+    );
+    assert_eq!(range.height(), 2, "1 表头 + 1 数据行");
 }

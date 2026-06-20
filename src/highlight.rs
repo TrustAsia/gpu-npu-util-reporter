@@ -75,6 +75,7 @@ impl<'de> Deserialize<'de> for HexColor {
 
 /// 单个触发器配置。`enabled: false` 则整体跳过。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct TriggerConfig {
     pub enabled: bool,
     /// 0–100 的阈值。
@@ -84,6 +85,7 @@ pub struct TriggerConfig {
 
 /// 8 个触发器的显式集合；`None` 字段 = 该触发器未配置/关闭。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ThresholdTriggers {
     #[serde(default)]
     pub core_avg_above: Option<TriggerConfig>,

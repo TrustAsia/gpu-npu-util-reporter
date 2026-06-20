@@ -161,7 +161,9 @@ pub fn render_to_buffer<S: BuildHasher>(
         let width = header_w.max(content_w).clamp(10.0, 50.0);
         // Excel 列数上限 16384，远在 u16 范围内。
         #[allow(clippy::cast_possible_truncation)]
-        let _ = sheet.set_column_width(i as u16, width);
+        sheet.set_column_width(i as u16, width).map_err(|e| AppError::Report {
+            detail: format!("设置列宽失败：{e}"),
+        })?;
     }
 
     wb.save_to_buffer().map_err(|e| AppError::Report {

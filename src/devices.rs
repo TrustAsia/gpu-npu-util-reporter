@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// `host_ip` 和 `node_name` 也在此配置，因为不同 exporter 使用的标签名不同
 /// （如 DCGM 常用 `ip`，NPU 可能用 `host_ip`；节点名可能是 `node` 或 `nodename`）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LabelMapping {
     /// 主机 IP 标签名（优先取此标签，取不到时从 instance 标签去端口解析）。
     pub host_ip: String,
@@ -48,33 +49,39 @@ pub enum MemoryStrategy {
 
 /// `composite_ratio` 包装体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CompositeRatioBody {
     pub composite_ratio: UsedFree,
 }
 /// `composite_from_total` 包装体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CompositeFromTotalBody {
     pub composite_from_total: UsedTotal,
 }
 /// `direct_metric` 包装体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DirectMetricBody {
     pub direct_metric: DirectInner,
 }
 /// used/free 两个字段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct UsedFree {
     pub used: String,
     pub free: String,
 }
 /// used/total 两个字段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct UsedTotal {
     pub used: String,
     pub total: String,
 }
 /// direct 指标 + 可选 fallback。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DirectInner {
     pub metric: String,
     #[serde(default)]
@@ -130,6 +137,7 @@ impl MemoryStrategy {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceSpec {
     /// 报表"设备类型"列显示名，如 "NVIDIA A10"。
     pub display_name: String,

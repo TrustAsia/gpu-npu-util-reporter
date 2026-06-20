@@ -44,10 +44,15 @@ pub fn init_logging(cfg: &LogConfig) -> Option<tracing_appender::non_blocking::W
         }
         let file = std::fs::File::create(&cfg.file_path).unwrap_or_else(|e| {
             eprintln!("[警告] 无法创建日志文件 {}：{e}，仅使用控制台输出", cfg.file_path);
-            std::fs::File::create("/dev/null").unwrap_or_else(|_| {
-                // 最终兜底：用内存缓冲，不实际写入
-                panic!("无法创建任何日志文件")
-            })
+            // 跨平台 null 设备：Unix 用 /dev/null，Windows 用 NUL。
+            // 如果 null 设备也无法创建（极端情况），panic 是合理的，
+            // 因为这表明文件系统完全不可用。
+            #[cfg(unix)]
+            { std::fs::File::create("/dev/null").expect("无法创建 /dev/null") }
+            #[cfg(windows)]
+            { std::fs::File::create("NUL").expect("无法创建 NUL") }
+            #[cfg(not(any(unix, windows)))]
+            { std::fs::File::create("/dev/null").expect("无法创建 null 设备") }
         });
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
         let file_layer = tracing_subscriber::fmt::layer()

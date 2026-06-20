@@ -409,4 +409,48 @@ mod tests {
         let s = parse_response(resp, "src").unwrap();
         assert!(s.is_empty(), "全 NaN/Inf 的 Matrix 不应产生空 Series");
     }
+
+    #[test]
+    fn parse_vector_response() {
+        // Vector 形式（instant query）当作单点序列
+        let resp = PromResponse {
+            status: "success".into(),
+            error: None,
+            data: Some(PromData {
+                result: vec![PromResult::Vector {
+                    metric: HashMap::from([("gpu".into(), "0".into())]),
+                    value: (1000.0, "50.0".into()),
+                }],
+            }),
+        };
+        let s = parse_response(resp, "src").unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].points.len(), 1);
+        assert!((s[0].points[0].1 - 50.0).abs() < 1e-9);
+        assert_eq!(s[0].labels["gpu"], "0");
+    }
+
+    #[test]
+    fn parse_vector_drops_nan_and_inf() {
+        // Vector 形式的 NaN/Inf 也应被过滤
+        let resp = PromResponse {
+            status: "success".into(),
+            error: None,
+            data: Some(PromData {
+                result: vec![
+                    PromResult::Vector {
+                        metric: HashMap::from([("gpu".into(), "0".into())]),
+                        value: (1000.0, "NaN".into()),
+                    },
+                    PromResult::Vector {
+                        metric: HashMap::from([("gpu".into(), "1".into())]),
+                        value: (1060.0, "50.0".into()),
+                    },
+                ],
+            }),
+        };
+        let s = parse_response(resp, "src").unwrap();
+        assert_eq!(s.len(), 1, "NaN 的 Vector 应被过滤");
+        assert_eq!(s[0].labels["gpu"], "1");
+    }
 }

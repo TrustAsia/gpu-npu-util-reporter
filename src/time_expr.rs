@@ -142,12 +142,30 @@ fn parse_offset(s: &str) -> Result<Duration, AppError> {
         let unit = bytes[pos] as char;
         pos += 1;
         let duration = match unit {
-            'y' => Duration::days(num * 365), // 近似：1年 = 365天
-            'M' => Duration::days(num * 30),  // 近似：1月 = 30天
-            'd' => Duration::days(num),
-            'h' => Duration::hours(num),
-            'm' => Duration::minutes(num),
-            's' => Duration::seconds(num),
+            'y' => num
+                .checked_mul(365)
+                .and_then(Duration::try_days)
+                .ok_or_else(|| AppError::TimeFormat {
+                    raw: format!("偏移量过大（{s}），数值溢出"),
+                })?,
+            'M' => num
+                .checked_mul(30)
+                .and_then(Duration::try_days)
+                .ok_or_else(|| AppError::TimeFormat {
+                    raw: format!("偏移量过大（{s}），数值溢出"),
+                })?,
+            'd' => Duration::try_days(num).ok_or_else(|| AppError::TimeFormat {
+                raw: format!("偏移量过大（{s}），数值溢出"),
+            })?,
+            'h' => Duration::try_hours(num).ok_or_else(|| AppError::TimeFormat {
+                raw: format!("偏移量过大（{s}），数值溢出"),
+            })?,
+            'm' => Duration::try_minutes(num).ok_or_else(|| AppError::TimeFormat {
+                raw: format!("偏移量过大（{s}），数值溢出"),
+            })?,
+            's' => Duration::try_seconds(num).ok_or_else(|| AppError::TimeFormat {
+                raw: format!("偏移量过大（{s}），数值溢出"),
+            })?,
             _ => {
                 return Err(AppError::TimeFormat {
                     raw: format!(
@@ -156,17 +174,41 @@ fn parse_offset(s: &str) -> Result<Duration, AppError> {
                 })
             }
         };
-        total += duration;
+        total = total
+            .checked_add(&duration)
+            .ok_or_else(|| AppError::TimeFormat {
+                raw: format!("偏移量过大（{s}），累计溢出"),
+            })?;
     }
-    let result = if sign < 0 { -total } else { total };
+    let result = if sign < 0 {
+        // -total 对 i64::MIN 秒会溢出，用 try_seconds 安全构造
+        let neg_secs = total.num_seconds().checked_neg().ok_or_else(|| AppError::TimeFormat {
+            raw: format!("偏移量过大（{s}），取反溢出"),
+        })?;
+        Duration::try_seconds(neg_secs).ok_or_else(|| AppError::TimeFormat {
+            raw: format!("偏移量过大（{s}），取反溢出"),
+        })?
+    } else {
+        total
+    };
     Ok(result)
 }
 
 /// 判断字符串是否为相对时间表达式（而非绝对时间）。
+///
+/// 使用与 [`parse_anchor`] 相同的严格检查：锚点后必须紧跟 `+`、`-` 或结束，
+/// 避免将 `"nowhere"`、`"starting_point"` 等误判为相对时间。
 #[must_use]
 pub fn is_relative_time(s: &str) -> bool {
     let trimmed = s.trim();
-    trimmed.starts_with("now") || trimmed.starts_with("start") || trimmed.starts_with("end")
+    for anchor in ["now", "start", "end"] {
+        if let Some(rest) = trimmed.strip_prefix(anchor) {
+            if rest.is_empty() || rest.starts_with('+') || rest.starts_with('-') {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -258,6 +300,17 @@ mod tests {
         assert!(is_relative_time("end-1d"));
         assert!(!is_relative_time("2026-06-18 00:00:00"));
         assert!(!is_relative_time("yesterday"));
+        // 严格检查：锚点后必须紧跟 +、- 或结束，不应误判
+        assert!(!is_relative_time("nowhere"), "nowhere 不应被判为相对时间");
+        assert!(!is_relative_time("starting_point"), "starting_point 不应被判为相对时间");
+        assert!(!is_relative_time("endgame"), "endgame 不应被判为相对时间");
+    }
+
+    #[test]
+    fn overflow_rejected() {
+        // 极大偏移量应被拒绝而非 panic
+        assert!(resolve_time_expr("now-99999999999999999y", &TimeContext::default()).is_err());
+        assert!(resolve_time_expr("now-999999999999999999d", &TimeContext::default()).is_err());
     }
 
     #[test]
