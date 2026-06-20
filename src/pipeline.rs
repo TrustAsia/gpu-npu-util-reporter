@@ -399,10 +399,18 @@ async fn query_with_ip_fallback(
         Ok(series) if !series.is_empty() => Some(series),
         _ => {
             // 回退：用 instance 标签（IP 可能从 instance 解析而来）。
-            // instance 格式为 "ip:port"，用 "^ip:" 精确匹配避免 IP 前缀误匹配
-            // （如 "1.1" 不应匹配 "1.1.1.1:9090"，只匹配 "1.1:port"）。
+            // instance 格式为 "ip:port" 或 "[ipv6]:port"，用正则精确匹配
+            // 避免 IP 前缀误匹配（如 "1.1" 不应匹配 "1.1.1.1:9090"）。
             // Prometheus 正则中 . 是通配符，需转义为 \.。
-            let ip_regex = format!("^{}:", ip_escaped.replace('.', r"\."));
+            // IPv6：extract_ip 剥去方括号（[2001:db8::1]:9090 → 2001:db8::1），
+            // 但 instance 原值含方括号，正则需重新加回。
+            let ip_escaped_dots = ip_escaped.replace('.', r"\.");
+            let ip_regex = if ip_escaped.contains(':') {
+                // IPv6：instance 为 [ip]:port，正则需匹配方括号
+                format!(r"^\[{ip_escaped_dots}\]:")
+            } else {
+                format!("^{ip_escaped_dots}:")
+            };
             let instance_promql = format!(
                 "{metric}{{{a}=\"{v}\",instance=~\"{ip_re}\"}}",
                 a = ctx.spec.card_id_label,
