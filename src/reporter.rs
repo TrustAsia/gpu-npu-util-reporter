@@ -31,7 +31,12 @@ pub struct ReportSpec {
 /// # Errors
 ///
 /// 返回 [`AppError::Report`] 当 Excel 写操作失败。
+///
+/// # Panics
+///
+/// 当 `compute_column_order` 产出的列名不在 `col_index` 中时 panic（内部逻辑一致性错误）。
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::missing_panics_doc)]
 pub fn render_to_buffer<S: BuildHasher>(
     records: &[CardRecord],
     spec: &ReportSpec,
@@ -111,7 +116,9 @@ pub fn render_to_buffer<S: BuildHasher>(
             hits.iter().map(|h| (h.column, h.color)).collect();
 
         for name in &order {
-            let idx = *col_index.get(name.as_str()).unwrap_or(&0);
+            let idx = *col_index.get(name.as_str()).unwrap_or_else(|| {
+                panic!("列「{name}」不在 col_index 中，compute_column_order 结果异常")
+            });
             // Excel 列数上限 16384，远在 u16 范围内。
             #[allow(clippy::cast_possible_truncation)]
             let col = idx as u16;

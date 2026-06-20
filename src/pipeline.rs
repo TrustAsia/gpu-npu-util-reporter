@@ -616,7 +616,7 @@ mod tests {
         }];
         let fetcher = MockFetcher::new()
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
-            .when(" / (", Ok(mem)); // gpu_memory_promql 含 " / ("
+            .when("ignoring(__name__)", Ok(mem)); // gpu_memory_promql 含 ignoring(__name__)
         let spec = crate::devices::nvidia_a10_spec();
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -669,7 +669,7 @@ mod tests {
         }];
         let fetcher = MockFetcher::new()
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
-            .when(" / (", Ok(mem));
+            .when("ignoring(__name__)", Ok(mem));
         let spec = crate::devices::nvidia_a10_spec();
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -830,7 +830,7 @@ mod tests {
         }];
         let fetcher = MockFetcher::new()
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
-            .when(" / (", Ok(mem));
+            .when("ignoring(__name__)", Ok(mem));
         let spec = crate::devices::nvidia_a10_spec();
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -873,7 +873,7 @@ mod tests {
         }];
         let fetcher = MockFetcher::new()
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
-            .when(" / (", Ok(mem));
+            .when("ignoring(__name__)", Ok(mem));
         let spec = crate::devices::nvidia_a10_spec();
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -899,8 +899,8 @@ mod tests {
         // 核心指标查询返回空（模拟该卡只有显存数据），显存指标有归属标签。
         // last_in_range 应回退到显存指标查询归属。
         //
-        // Mock 匹配规则：按子串首次命中。GPU 显存的 composite PromQL 含 " / ("，
-        // 所以下面 when(" / (", ...) 只匹配那个复合查询；而归属回退查询的是
+        // Mock 匹配规则：按子串首次命中。GPU 显存的 composite PromQL 含 "ignoring(__name__)"，
+        // 所以下面 when("ignoring(__name__)", ...) 只匹配那个复合查询；而归属回退查询的是
         // 单独的 used 指标名 DCGM_FI_DEV_FB_USED{gpu="0"}，需要单独注册。
         let mem_series = vec![Series {
             labels: labels(&[
@@ -914,7 +914,7 @@ mod tests {
         }];
         let fetcher = MockFetcher::new()
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(vec![])) // 核心无数据
-            .when(" / (", Ok(mem_series.clone()))      // 显存复合查询
+            .when("ignoring(__name__)", Ok(mem_series.clone()))      // 显存复合查询
             .when("DCGM_FI_DEV_FB_USED", Ok(mem_series)); // 归属回退查询 used 指标
         let spec = crate::devices::nvidia_a10_spec();
         let cfg = cfg_with_mode("last_in_range");
@@ -983,7 +983,7 @@ mod tests {
         }];
         let fetcher = MockFetcher::new()
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
-            .when(" / (", Ok(mem));
+            .when("ignoring(__name__)", Ok(mem));
         let mut spec = crate::devices::nvidia_a10_spec();
         spec.labels.node_name = "nodename".into(); // 配置为 "nodename" 而非默认 "node"
         let cfg = cfg_with_mode("instant");
@@ -1060,6 +1060,7 @@ mod tests {
     // ---- last_in_range 多主机归属隔离：host_ip 过滤确保不跨主机取归属 ----
 
     #[tokio::test]
+    #[allow(clippy::similar_names)]
     async fn last_in_range_isolates_ownership_by_host_ip() {
         // 两台主机各有 gpu=0 的卡，Pod 不同。last_in_range 归属查询应加
         // host_ip 过滤，确保每张卡只取本主机的归属，而非跨主机污染。

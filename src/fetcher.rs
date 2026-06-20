@@ -258,9 +258,13 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
 }
 
 /// 由 GPU 显存策略生成单条 `PromQL`（`FB_USED/(FB_USED+FB_FREE)*100`）。
+///
+/// `ignoring(__name__)` 必不可少：Prometheus 二元运算在两个即时向量间按所有标签
+/// （含 `__name__`）匹配。`used` 与 `free` 的 `__name__` 不同，不加 `ignoring`
+/// 会导致内层加法返回空集，进而整条表达式产出 0 条时序——所有 GPU 显存数据静默丢失。
 #[must_use]
 pub fn gpu_memory_promql(used: &str, free: &str) -> String {
-    format!("{used} / ({used} + {free}) * 100")
+    format!("{used} / ignoring(__name__) ({used} + ignoring(__name__) {free}) * 100")
 }
 
 /// 测试用 Mock fetcher：按 promql 子串匹配返回预设序列，或注入错误。
@@ -359,7 +363,9 @@ mod tests {
     fn gpu_memory_promql_format() {
         let q = gpu_memory_promql("DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE");
         assert!(
-            q.contains("DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 100")
+            q.contains("ignoring(__name__)")
+                && q.contains("DCGM_FI_DEV_FB_USED / ignoring(__name__)")
+                && q.contains("DCGM_FI_DEV_FB_USED + ignoring(__name__) DCGM_FI_DEV_FB_FREE")
         );
     }
 
