@@ -148,7 +148,12 @@ pub async fn collect_device(
                 fallback_used_total(&mut ctx, &MemoryStrategy::CompositeFromTotal(top.clone()))
                     .await
             }
-            MemoryStrategy::CompositeRatio(_) => Vec::new(),
+            MemoryStrategy::CompositeRatio(b) => {
+                // CompositeRatio 组合 PromQL 返回空时，降级为分别查 used/free，
+                // 按 (host_ip, card_id) 对齐后算 used/(used+free)*100。
+                // 复用 fallback_used_total 的 merge+join 逻辑，但 total = used + free。
+                fallback_composite_ratio(&mut ctx, &b.composite_ratio).await
+            }
         }
     } else {
         mem_series
@@ -286,16 +291,122 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
         merge_into(total_by_key.entry(key).or_default(), t);
     }
 
-    used_s
+    // used 同样按 join key 合并（Pod 漂移可能产出多条 used series），
+    // 保证 hbm_fallback_series 的 used/total 对齐来自同一时间戳。
+    let mut used_by_key: HashMap<String, Option<Series>> = HashMap::new();
+    for u in used_s {
+        let key = series_key(&u, ctx.spec);
+        merge_into(used_by_key.entry(key).or_default(), u);
+    }
+
+    used_by_key
         .into_iter()
-        .filter_map(|u| {
-            let key = series_key(&u, ctx.spec);
+        .filter_map(|(key, u_opt)| {
+            let u = u_opt?;
             total_by_key
                 .get(&key)
                 .and_then(|opt| opt.as_ref())
                 .map(|t| processor::hbm_fallback_series(&u, t))
         })
         .collect()
+}
+
+/// `CompositeRatio` fallback：组合 `PromQL` 返回空时，分别查 used/free，
+/// 按 (`host_ip`, `card_id`) 对齐后构造 total = used + free 的伪 Series，
+/// 再调用 [`processor::hbm_fallback_series`] 计算 used/(used+free)*100。
+///
+/// 这与 `fallback_used_total` 的区别在于 total 不是直接查到的指标，
+/// 而是由 used + free 逐点相加合成。
+async fn fallback_composite_ratio(
+    ctx: &mut QueryContext<'_>,
+    uf: &crate::devices::UsedFree,
+) -> Vec<Series> {
+    let used_s = fetch_with_warning(ctx, &uf.used).await;
+    let free_s = fetch_with_warning(ctx, &uf.free).await;
+
+    // 按 join key 合并 used 和 free
+    let mut used_by_key: HashMap<String, Option<Series>> = HashMap::new();
+    for u in used_s {
+        let key = series_key(&u, ctx.spec);
+        merge_into(used_by_key.entry(key).or_default(), u);
+    }
+    let mut free_by_key: HashMap<String, Option<Series>> = HashMap::new();
+    for f in free_s {
+        let key = series_key(&f, ctx.spec);
+        merge_into(free_by_key.entry(key).or_default(), f);
+    }
+
+    used_by_key
+        .into_iter()
+        .filter_map(|(key, u_opt)| {
+            let u = u_opt?;
+            let f_opt = free_by_key.get(&key).and_then(|opt| opt.as_ref())?;
+            // 合成 total = used + free 的伪 Series（逐点相加）
+            let total = synthesize_total(&u, f_opt);
+            Some(processor::hbm_fallback_series(&u, &total))
+        })
+        .collect()
+}
+
+/// 由 used + free 逐点相加合成 total Series。
+///
+/// 按 timestamp 对齐：仅保留 used 和 free 都有数据的时间戳，
+/// total 值 = used + free。保留 used 的标签（身份标签已由 join key 对齐）。
+fn synthesize_total(used: &Series, free: &Series) -> Series {
+    let free_map: HashMap<i64, f64> = free
+        .points
+        .iter()
+        .map(|(ts, v)| (ts.timestamp(), *v))
+        .collect();
+    let mut points = Vec::new();
+    for (ts, u) in &used.points {
+        if let Some(f) = free_map.get(&ts.timestamp()) {
+            let total = u + f;
+            if total > 0.0 && total.is_finite() {
+                points.push((*ts, total));
+            }
+        }
+    }
+    Series {
+        labels: used.labels.clone(),
+        points,
+    }
+}
+
+/// 用 `host_ip` 标签过滤查询归属数据；若返回空，回退用 instance 标签重试。
+///
+/// 当 `extract_ip` 从 `instance` 标签解析 IP（因 `spec.labels.host_ip` 指定的标签
+/// 为空），归属查询用 `spec.labels.host_ip` 作标签名会匹配不到，需回退到
+/// `instance` 标签。`instance` 值含端口，用正则 `=~` 匹配 IP 前缀。
+async fn query_with_ip_fallback(
+    ctx: &mut QueryContext<'_>,
+    metric: &str,
+    escaped_card_id: &str,
+    ip_escaped: &str,
+) -> Option<Vec<Series>> {
+    let promql = format!(
+        "{metric}{{{a}=\"{v}\",{ip_label}=\"{ip}\"}}",
+        a = ctx.spec.card_id_label,
+        v = escaped_card_id,
+        ip_label = ctx.spec.labels.host_ip,
+        ip = ip_escaped
+    );
+    match ctx.fetcher.query_range(&promql, ctx.start, ctx.end, ctx.step).await {
+        Ok(series) if !series.is_empty() => Some(series),
+        _ => {
+            // 回退：用 instance 标签（IP 可能从 instance 解析而来）
+            let instance_promql = format!(
+                "{metric}{{{a}=\"{v}\",instance=~\"{ip}.*\"}}",
+                a = ctx.spec.card_id_label,
+                v = escaped_card_id,
+                ip = ip_escaped
+            );
+            match ctx.fetcher.query_range(&instance_promql, ctx.start, ctx.end, ctx.step).await {
+                Ok(series) if !series.is_empty() => Some(series),
+                _ => None,
+            }
+        }
+    }
 }
 
 /// 解析单卡的归属（namespace/pod/container）。
@@ -357,62 +468,32 @@ async fn ownership_for(
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t");
-    let promql = format!(
-        "{metric}{{{a}=\"{v}\",{ip_label}=\"{ip}\"}}",
-        metric = ctx.spec.core_util_metric,
-        a = ctx.spec.card_id_label,
-        v = escaped,
-        ip_label = ctx.spec.labels.host_ip,
-        ip = ip_escaped
-    );
-    match ctx
-        .fetcher
-        .query_range(&promql, ctx.start, ctx.end, ctx.step)
-        .await
+
+    // 优先用核心指标查归属，含 instance 标签回退
+    if let Some(series) =
+        query_with_ip_fallback(ctx, &ctx.spec.core_util_metric, &escaped, &ip_escaped).await
     {
-        Ok(series) if !series.is_empty() => {
-            let ns = last_label_value(&series, &ctx.spec.labels.namespace);
-            let pod = last_label_value(&series, &ctx.spec.labels.pod);
-            let ct = last_label_value(&series, &ctx.spec.labels.container);
-            (ns, pod, ct)
-        }
-        Ok(_) => {
-            // 核心指标无数据（如该卡只有显存数据），回退到显存指标查询归属。
-            // 依次尝试所有显存指标（含 fallback 链），因为 DirectMetric 的主指标
-            // 无数据时，fallback 的 used 指标仍可能有归属标签。
-            let mem_names = ctx.spec.memory.ownership_metric_names();
-            let mut ownership = (String::new(), String::new(), String::new());
-            for mem_metric in &mem_names {
-                let mem_promql = format!(
-                    "{metric}{{{a}=\"{v}\",{ip_label}=\"{ip}\"}}",
-                    metric = mem_metric,
-                    a = ctx.spec.card_id_label,
-                    v = escaped,
-                    ip_label = ctx.spec.labels.host_ip,
-                    ip = ip_escaped
-                );
-                match ctx
-                    .fetcher
-                    .query_range(&mem_promql, ctx.start, ctx.end, ctx.step)
-                    .await
-                {
-                    Ok(mem_series) if !mem_series.is_empty() => {
-                        let ns = last_label_value(&mem_series, &ctx.spec.labels.namespace);
-                        let pod = last_label_value(&mem_series, &ctx.spec.labels.pod);
-                        let ct = last_label_value(&mem_series, &ctx.spec.labels.container);
-                        ownership = (ns, pod, ct);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            ownership
-        }
-        Err(e) => {
-            ctx.out.push_warning(format!("{e}"));
-            (String::new(), String::new(), String::new())
+        let ns = last_label_value(&series, &ctx.spec.labels.namespace);
+        let pod = last_label_value(&series, &ctx.spec.labels.pod);
+        let ct = last_label_value(&series, &ctx.spec.labels.container);
+        return (ns, pod, ct);
+    }
+
+    // 核心指标无数据（如该卡只有显存数据），回退到显存指标查询归属。
+    // 依次尝试所有显存指标（含 fallback 链），因为 DirectMetric 的主指标
+    // 无数据时，fallback 的 used 指标仍可能有归属标签。
+    let mem_names = ctx.spec.memory.ownership_metric_names();
+    for mem_metric in &mem_names {
+        if let Some(mem_series) =
+            query_with_ip_fallback(ctx, mem_metric, &escaped, &ip_escaped).await
+        {
+            let ns = last_label_value(&mem_series, &ctx.spec.labels.namespace);
+            let pod = last_label_value(&mem_series, &ctx.spec.labels.pod);
+            let ct = last_label_value(&mem_series, &ctx.spec.labels.container);
+            return (ns, pod, ct);
         }
     }
+    (String::new(), String::new(), String::new())
 }
 
 /// 从多条 series 中取某标签的末态非空值：把每条 series 的 (最大时间戳, 标签值)
