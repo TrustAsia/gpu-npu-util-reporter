@@ -38,11 +38,17 @@ pub struct PrometheusFetcher {
     source_name: String,
 }
 
+/// Prometheus 响应体大小上限（100 MB），防止异常大响应耗尽内存。
+const MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
+
 impl PrometheusFetcher {
     #[must_use]
     pub fn new(source_name: String, base_url: String, timeout_secs: u64) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::ClientBuilder::new()
+                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .build()
+                .unwrap_or_default(),
             base_url,
             timeout: std::time::Duration::from_secs(timeout_secs),
             source_name,
@@ -113,6 +119,7 @@ impl MetricFetcher for PrometheusFetcher {
             url: self.base_url.clone(),
             detail: format!("HTTP 请求失败：{e}"),
         })?;
+        check_response_size(&resp, &self.source_name, &self.base_url)?;
         let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
             source_name: self.source_name.clone(),
             url: self.base_url.clone(),
@@ -140,6 +147,7 @@ impl MetricFetcher for PrometheusFetcher {
             url: self.base_url.clone(),
             detail: format!("HTTP 请求失败：{e}"),
         })?;
+        check_response_size(&resp, &self.source_name, &self.base_url)?;
         let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
             source_name: self.source_name.clone(),
             url: self.base_url.clone(),
@@ -147,6 +155,24 @@ impl MetricFetcher for PrometheusFetcher {
         })?;
         parse_response(body, &self.source_name)
     }
+}
+
+/// 检查响应体大小，防止异常大响应耗尽内存。
+fn check_response_size(
+    resp: &reqwest::Response,
+    source_name: &str,
+    url: &str,
+) -> Result<(), AppError> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES {
+            return Err(AppError::Prometheus {
+                source_name: source_name.into(),
+                url: url.into(),
+                detail: format!("响应体过大（{len} 字节，上限 {MAX_RESPONSE_BYTES} 字节）"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// 把 Prometheus 响应转成 Series 列表。Vector 形式当作单点序列。

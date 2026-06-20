@@ -219,6 +219,18 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             reason: "report.query_step_secs 必须 > 0".into(),
         });
     }
+    if cfg.report.query_step_secs > i64::MAX as u64 {
+        return Err(AppError::Config {
+            path: path.into(),
+            reason: format!("report.query_step_secs 过大（最大 {}）", i64::MAX),
+        });
+    }
+    if cfg.sources.iter().any(|s| s.timeout_secs == 0) {
+        return Err(AppError::Config {
+            path: path.into(),
+            reason: "sources[].timeout_secs 必须 > 0".into(),
+        });
+    }
     // 校验时间范围逻辑：start 必须早于 end，否则 Prometheus 返回空数据。
     let start = NaiveDateTime::parse_from_str(&cfg.time_range.start, "%Y-%m-%d %H:%M:%S");
     let end = NaiveDateTime::parse_from_str(&cfg.time_range.end, "%Y-%m-%d %H:%M:%S");
@@ -366,5 +378,19 @@ mod tests {
             },
         );
         assert!(r.is_err(), "start >= end 应被拒绝");
+    }
+
+    #[test]
+    fn config_rejects_zero_timeout() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].timeout_secs = 0;
+        assert!(validate_config(&cfg, "test.yaml").is_err(), "timeout_secs=0 应被拒绝");
+    }
+
+    #[test]
+    fn config_rejects_oversized_query_step() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.report.query_step_secs = u64::MAX;
+        assert!(validate_config(&cfg, "test.yaml").is_err(), "超大 query_step_secs 应被拒绝");
     }
 }
