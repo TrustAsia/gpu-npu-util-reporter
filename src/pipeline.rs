@@ -384,6 +384,10 @@ async fn query_with_ip_fallback(
     escaped_card_id: &str,
     ip_escaped: &str,
 ) -> Option<Vec<Series>> {
+    // host_ip 为空时无法安全过滤，跳过归属查询避免跨主机污染
+    if ip_escaped.is_empty() {
+        return None;
+    }
     let promql = format!(
         "{metric}{{{a}=\"{v}\",{ip_label}=\"{ip}\"}}",
         a = ctx.spec.card_id_label,
@@ -394,12 +398,16 @@ async fn query_with_ip_fallback(
     match ctx.fetcher.query_range(&promql, ctx.start, ctx.end, ctx.step).await {
         Ok(series) if !series.is_empty() => Some(series),
         _ => {
-            // 回退：用 instance 标签（IP 可能从 instance 解析而来）
+            // 回退：用 instance 标签（IP 可能从 instance 解析而来）。
+            // instance 格式为 "ip:port"，用 "^ip:" 精确匹配避免 IP 前缀误匹配
+            // （如 "1.1" 不应匹配 "1.1.1.1:9090"，只匹配 "1.1:port"）。
+            // Prometheus 正则中 . 是通配符，需转义为 \.。
+            let ip_regex = format!("^{}:", ip_escaped.replace('.', r"\."));
             let instance_promql = format!(
-                "{metric}{{{a}=\"{v}\",instance=~\"{ip}.*\"}}",
+                "{metric}{{{a}=\"{v}\",instance=~\"{ip_re}\"}}",
                 a = ctx.spec.card_id_label,
                 v = escaped_card_id,
-                ip = ip_escaped
+                ip_re = ip_regex
             );
             match ctx.fetcher.query_range(&instance_promql, ctx.start, ctx.end, ctx.step).await {
                 Ok(series) if !series.is_empty() => Some(series),
@@ -1189,5 +1197,54 @@ mod tests {
         let b = out.records.iter().find(|r| r.host_ip == "2.2.2.2").expect("应有主机 B");
         assert_eq!(a.pod, "pod-a", "主机 A 的卡应归属 pod-a（不应被主机 B 的 pod-b 污染）");
         assert_eq!(b.pod, "pod-b", "主机 B 的卡应归属 pod-b");
+    }
+
+    // ---- synthesize_total 逐点相加 ----
+
+    #[test]
+    fn synthesize_total_adds_used_and_free() {
+        let used = Series {
+            labels: HashMap::new(),
+            points: vec![(t(0), 30.0), (t(60), 60.0)],
+        };
+        let free = Series {
+            labels: HashMap::new(),
+            points: vec![(t(0), 170.0), (t(60), 240.0)],
+        };
+        let total = synthesize_total(&used, &free);
+        assert_eq!(total.points.len(), 2);
+        assert!((total.points[0].1 - 200.0).abs() < 1e-9); // 30 + 170 = 200
+        assert!((total.points[1].1 - 300.0).abs() < 1e-9); // 60 + 240 = 300
+    }
+
+    #[test]
+    fn synthesize_total_skips_timestamps_missing_in_free() {
+        let used = Series {
+            labels: HashMap::new(),
+            points: vec![(t(0), 30.0), (t(60), 60.0), (t(120), 90.0)],
+        };
+        let free = Series {
+            labels: HashMap::new(),
+            points: vec![(t(0), 170.0), (t(120), 110.0)], // t60 缺失
+        };
+        let total = synthesize_total(&used, &free);
+        assert_eq!(total.points.len(), 2, "缺失 free 的时间戳应跳过");
+        assert!((total.points[0].1 - 200.0).abs() < 1e-9); // t0: 30+170
+        assert!((total.points[1].1 - 200.0).abs() < 1e-9); // t120: 90+110
+    }
+
+    #[test]
+    fn synthesize_total_skips_zero_and_non_finite_total() {
+        let used = Series {
+            labels: HashMap::new(),
+            points: vec![(t(0), 0.0), (t(60), f64::MAX), (t(120), 50.0)],
+        };
+        let free = Series {
+            labels: HashMap::new(),
+            points: vec![(t(0), 0.0), (t(60), f64::MAX), (t(120), 150.0)],
+        };
+        let total = synthesize_total(&used, &free);
+        assert_eq!(total.points.len(), 1, "total=0 和 Inf 应被跳过");
+        assert!((total.points[0].1 - 200.0).abs() < 1e-9); // t120: 50+150=200
     }
 }
