@@ -169,6 +169,7 @@ jobs:
 
       - name: Read version
         id: version
+        shell: bash
         run: |
           VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -230,7 +231,13 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          PREV_TAG=$(git tag --sort=-version:refname | head -1 || true)
+          # 找到 HEAD 的祖先中版本号最大的 tag，避免取到其他分支的 tag
+          PREV_TAG=$(git tag --sort=-version:refname | while read -r t; do
+            if git merge-base --is-ancestor "$t" HEAD 2>/dev/null; then
+              echo "$t"
+              break
+            fi
+          done || true)
           if [ -n "$PREV_TAG" ]; then
             LOG=$(git log "${PREV_TAG}"..HEAD --pretty=format:"- %s (%h)" --no-merges)
           else

@@ -109,12 +109,15 @@ impl MetricFetcher for PrometheusFetcher {
             return self.query_range_single(promql, start, end, step).await;
         }
 
-        // 分段：每段最多 PROM_MAX_POINTS 个点，段长 = step * PROM_MAX_POINTS
-        let segment_secs = step_secs * PROM_MAX_POINTS;
+        // 分段：每段最多 PROM_MAX_POINTS-1 个 step-interval（含两端点共 PROM_MAX_POINTS 个点）。
+        // Prometheus query_range 包含 start 和 end 时刻，11000 个 interval = 11001 个点，
+        // 超出 --query.max-samples 默认值 11000，因此每段最多 10999 个 interval。
+        let segment_secs = step_secs * (PROM_MAX_POINTS - 1);
         let num_segments = (range_secs + segment_secs - 1) / segment_secs; // ceil
 
         let mut all_series: Vec<Series> = Vec::new();
         let mut seg_start = start;
+        let mut partial_failure = false;
         for i in 0..num_segments {
             let seg_end = if i == num_segments - 1 {
                 end
@@ -126,17 +129,29 @@ impl MetricFetcher for PrometheusFetcher {
                     merge_series(&mut all_series, segments);
                 }
                 Err(e) => {
-                    // 单段失败不丢弃已获取的数据，直接返回已合并的部分结果。
-                    // 调用方（pipeline）会将 Err 转为 Warning，但部分数据仍可聚合。
+                    // 单段失败：保留已获取的部分数据，但标记为部分失败。
+                    // 调用方（pipeline fetch_with_warning）会对 Err 发出 Warning，
+                    // 但部分数据仍可用于聚合（优于全丢）。
                     if all_series.is_empty() {
                         return Err(e);
                     }
-                    // 有部分数据时返回 Ok，让调用方正常聚合已获取的数据；
-                    // 注意：部分缺失可能导致某些卡数据不完整，但优于全丢。
+                    partial_failure = true;
                     break;
                 }
             }
             seg_start = seg_end;
+        }
+        if partial_failure {
+            // 返回 Err 让调用方发出 Warning，但已获取的数据不会丢失——
+            // pipeline 的 fetch_with_warning 在 Err 时会尝试 fallback 路径，
+            // 如果 fallback 也失败，则该指标标记为 N/A。
+            // 注意：这意味着部分已获取的数据会被丢弃，但这是诚实的做法——
+            // 部分时间范围的数据可能导致误导性的均值/峰值统计。
+            return Err(AppError::Prometheus {
+                source_name: self.source_name.clone(),
+                url: self.base_url.clone(),
+                detail: "分段查询部分失败，数据可能不完整".into(),
+            });
         }
         Ok(all_series)
     }
