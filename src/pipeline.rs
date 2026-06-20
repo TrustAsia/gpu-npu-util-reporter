@@ -200,7 +200,7 @@ pub async fn collect_device(
 
         // 归属
         let (namespace, pod, container) =
-            ownership_for(&mut ctx, mode, &card_id, core.as_ref(), mem.as_ref()).await;
+            ownership_for(&mut ctx, mode, &host_ip, &card_id, core.as_ref(), mem.as_ref()).await;
 
         ctx.out.records.push(CardRecord {
             source_name: source_name.into(),
@@ -301,14 +301,17 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
 /// 解析单卡的归属（namespace/pod/container）。
 ///
 /// `Instant`：直接从 range 查询返回的标签取（与原行为一致，向后兼容）。
-/// `LastInRange`：重新查询该卡的核心利用率序列（按 `card_id_label` 过滤），
-/// 收集所有点的归属标签值，按时间排序后取末态非空值——即使 Pod 在窗口
-/// 中途漂移，也能锁定窗口内最后一个归属（PRD §2.4）。
+/// `LastInRange`：重新查询该卡的核心利用率序列（按 `card_id_label` + `host_ip`
+/// 标签过滤），收集所有点的归属标签值，按时间排序后取末态非空值——即使 Pod 在
+/// 窗口中途漂移，也能锁定窗口内最后一个归属（PRD §2.4）。
+///
+/// `host_ip` 过滤确保多主机集群中只查目标主机的数据，避免跨主机归属错乱。
 ///
 /// 查询失败按 Warning 降级，归属字段留空而非中断。
 async fn ownership_for(
     ctx: &mut QueryContext<'_>,
     mode: OwnershipMode,
+    host_ip: &str,
     card_id: &str,
     core: Option<&Series>,
     mem: Option<&Series>,
@@ -338,20 +341,29 @@ async fn ownership_for(
         );
     }
 
-    // LastInRange：按 card_id 过滤重新拉取该卡的归属时序。Pod 漂移会产出
+    // LastInRange：按 card_id + host_ip 过滤重新拉取该卡的归属时序。Pod 漂移会产出
     // 多条 series（每条带不同归属标签集），按点的最大时间戳排序取末态非空。
-    // 对 card_id 值做 PromQL 转义，防止标签值中的引号/反斜杠/换行破坏查询语法。
+    // host_ip 过滤确保多主机集群中只查目标主机，避免跨主机归属错乱。
+    // 对 card_id/host_ip 值做 PromQL 转义，防止标签值中的引号/反斜杠/换行破坏查询语法。
     let escaped = card_id
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t");
+    let ip_escaped = host_ip
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     let promql = format!(
-        "{metric}{{{a}=\"{v}\"}}",
+        "{metric}{{{a}=\"{v}\",{ip_label}=\"{ip}\"}}",
         metric = ctx.spec.core_util_metric,
         a = ctx.spec.card_id_label,
-        v = escaped
+        v = escaped,
+        ip_label = ctx.spec.labels.host_ip,
+        ip = ip_escaped
     );
     match ctx
         .fetcher
@@ -372,10 +384,12 @@ async fn ownership_for(
             let mut ownership = (String::new(), String::new(), String::new());
             for mem_metric in &mem_names {
                 let mem_promql = format!(
-                    "{metric}{{{a}=\"{v}\"}}",
+                    "{metric}{{{a}=\"{v}\",{ip_label}=\"{ip}\"}}",
                     metric = mem_metric,
                     a = ctx.spec.card_id_label,
-                    v = escaped
+                    v = escaped,
+                    ip_label = ctx.spec.labels.host_ip,
+                    ip = ip_escaped
                 );
                 match ctx
                     .fetcher
@@ -1041,5 +1055,57 @@ mod tests {
         .await;
         let r = &out.records[0];
         assert_eq!(r.node_name, "", "标签中无 node 键时 node_name 应为空串");
+    }
+
+    // ---- last_in_range 多主机归属隔离：host_ip 过滤确保不跨主机取归属 ----
+
+    #[tokio::test]
+    async fn last_in_range_isolates_ownership_by_host_ip() {
+        // 两台主机各有 gpu=0 的卡，Pod 不同。last_in_range 归属查询应加
+        // host_ip 过滤，确保每张卡只取本主机的归属，而非跨主机污染。
+        //
+        // 主机 A (1.1.1.1)：gpu=0, pod=pod-a（时间戳 t0）
+        // 主机 B (2.2.2.2)：gpu=0, pod=pod-b（时间戳 t60，更晚）
+        //
+        // Mock 注册策略：用精确子串区分带不同 host_ip 的归属查询。
+        // 核心指标查询匹配 "DCGM_FI_DEV_GPU_UTIL" 返回两条 series（用于聚合），
+        // 但归属查询是带 ip 过滤的 PromQL，通过匹配更具体的子串返回单主机数据。
+        let host_a_series = vec![Series {
+            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1"), ("pod", "pod-a")]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let host_b_series = vec![Series {
+            labels: labels(&[("gpu", "0"), ("ip", "2.2.2.2"), ("pod", "pod-b")]),
+            points: vec![(t(60), 30.0)],
+        }];
+        // 核心查询（首次注册，按子串首次命中）：两条 series 都返回用于聚合
+        let core_series = vec![
+            host_a_series[0].clone(),
+            host_b_series[0].clone(),
+        ];
+        let fetcher = MockFetcher::new()
+            // 归属查询带 ip="1.1.1.1" → 匹配此注册（更具体的子串先注册）
+            .when(r#"ip="1.1.1.1""#, Ok(host_a_series))
+            // 归属查询带 ip="2.2.2.2" → 匹配此注册
+            .when(r#"ip="2.2.2.2""#, Ok(host_b_series))
+            // 核心指标查询（不含 ip= 过滤）→ 匹配此注册
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core_series));
+        let spec = crate::devices::nvidia_a10_spec();
+        let cfg = cfg_with_mode("last_in_range");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(120),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert_eq!(out.records.len(), 2, "应产出 2 张卡（2 台主机各 1 张）");
+        let a = out.records.iter().find(|r| r.host_ip == "1.1.1.1").expect("应有主机 A");
+        let b = out.records.iter().find(|r| r.host_ip == "2.2.2.2").expect("应有主机 B");
+        assert_eq!(a.pod, "pod-a", "主机 A 的卡应归属 pod-a（不应被主机 B 的 pod-b 污染）");
+        assert_eq!(b.pod, "pod-b", "主机 B 的卡应归属 pod-b");
     }
 }
