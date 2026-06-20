@@ -284,10 +284,10 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             reason: "report.query_step_secs 必须 > 0".into(),
         });
     }
-    if cfg.report.query_step_secs > i64::MAX as u64 {
+    if cfg.report.query_step_secs > (i64::MAX / 1_000) as u64 {
         return Err(AppError::Config {
             path: path.into(),
-            reason: format!("report.query_step_secs 过大（最大 {}）", i64::MAX),
+            reason: format!("report.query_step_secs 过大（最大 {}）", i64::MAX / 1_000),
         });
     }
     if cfg.sources.iter().any(|s| s.timeout_secs == 0) {

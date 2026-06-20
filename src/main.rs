@@ -140,7 +140,11 @@ async fn main() -> ExitCode {
         info!("日志文件路径：{log_file_path}");
     }
 
-    let step = Duration::seconds(cfg.report.query_step_secs.cast_signed());
+    let step = Duration::try_seconds(cfg.report.query_step_secs.cast_signed())
+        .unwrap_or_else(|| {
+            error!("query_step_secs 过大（{}），使用默认 60 秒", cfg.report.query_step_secs);
+            Duration::seconds(60)
+        });
 
     // 5. 采集 + 聚合（单源/单卡失败 → Warning，不中断）
     let mut warnings: Vec<String> = Vec::new();
