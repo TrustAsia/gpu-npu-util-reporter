@@ -1,8 +1,12 @@
-[build]
-build-std = true
+# Cross.toml — 仅用于 cross-rs/cross 方式构建 macOS 目标
+# 已切换为 cargo-zigbuild，此文件不再生效
+# 如需恢复 cross 方式，取消以下注释并恢复 workflow 中 build-darwin 的 cross 版本
 
-[target.x86_64-apple-darwin]
-image = "ghcr.io/cross-rs/x86_64-apple-darwin-cross:local"
-
-[target.aarch64-apple-darwin]
-image = "ghcr.io/cross-rs/aarch64-apple-darwin-cross:local"
+# [build]
+# build-std = true
+#
+# [target.x86_64-apple-darwin]
+# image = "ghcr.io/cross-rs/x86_64-apple-darwin-cross:local"
+#
+# [target.aarch64-apple-darwin]
+# image = "ghcr.io/cross-rs/aarch64-apple-darwin-cross:local"

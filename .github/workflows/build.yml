@@ -69,6 +69,59 @@ jobs:
           path: target/${{ matrix.target }}/release/gpu-npu-util-reporter${{ matrix.suffix }}
           if-no-files-found: error
 
+  # build-darwin (cross-rs/cross 方式，已替换为 zigbuild)
+  # build-darwin:
+  #   name: Build ${{ matrix.target }}
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include:
+  #         - target: x86_64-apple-darwin
+  #           cross-image: x86_64-apple-darwin-cross
+  #         - target: aarch64-apple-darwin
+  #           cross-image: aarch64-apple-darwin-cross
+  #
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Install Rust toolchains
+  #       uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         targets: ${{ matrix.target }}
+  #
+  #     - name: Install nightly toolchain (build-std)
+  #       uses: dtolnay/rust-toolchain@nightly
+  #       with:
+  #         targets: ${{ matrix.target }}
+  #
+  #     - name: Checkout cross (with cross-toolchains submodule)
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: cross-rs/cross
+  #         path: cross
+  #         submodules: true
+  #
+  #     - name: Build cross Docker image with macOS SDK
+  #       working-directory: cross
+  #       run: |
+  #         cargo xtask build-docker-image ${{ matrix.cross-image }} --tag local \
+  #           --build-arg "MACOS_SDK_URL=https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz"
+  #
+  #     - name: Install cross
+  #       working-directory: cross
+  #       run: cargo install --path .
+  #
+  #     - name: Build
+  #       run: cross build --release --target ${{ matrix.target }}
+  #
+  #     - name: Upload artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: gpu-npu-util-reporter-${{ matrix.target }}
+  #         path: target/${{ matrix.target }}/release/gpu-npu-util-reporter
+  #         if-no-files-found: error
+
   build-darwin:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -77,42 +130,29 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            cross-image: x86_64-apple-darwin-cross
           - target: aarch64-apple-darwin
-            cross-image: aarch64-apple-darwin-cross
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchains
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install nightly toolchain (build-std)
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
 
-      - name: Checkout cross (with cross-toolchains submodule)
-        uses: actions/checkout@v4
-        with:
-          repository: cross-rs/cross
-          path: cross
-          submodules: true
-
-      - name: Build cross Docker image with macOS SDK
-        working-directory: cross
+      - name: Download macOS SDK
         run: |
-          cargo xtask build-docker-image ${{ matrix.cross-image }} --tag local \
-            --build-arg "MACOS_SDK_URL=https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz"
-
-      - name: Install cross
-        working-directory: cross
-        run: cargo install --path .
+          curl -L -o MacOSX14.5.sdk.tar.xz \
+            https://github.com/joseluisq/macosx-sdks/releases/download/14.5/MacOSX14.5.sdk.tar.xz
+          tar -xf MacOSX14.5.sdk.tar.xz
 
       - name: Build
-        run: cross build --release --target ${{ matrix.target }}
+        env:
+          SDKROOT: ${{ github.workspace }}/MacOSX14.5.sdk
+        run: cargo zigbuild --release --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
