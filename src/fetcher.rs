@@ -104,8 +104,10 @@ impl MetricFetcher for PrometheusFetcher {
         let range_secs = (end - start).num_seconds().max(1);
         let estimated_points = range_secs / step_secs;
 
-        if estimated_points <= PROM_MAX_POINTS {
-            // 单次查询不超限，直接请求
+        // estimated_points 是 step-interval 数，实际数据点数 = interval + 1（含两端点）。
+        // Prometheus --query.max-samples 默认 11000，允许最多 11000 个 interval（11001 点），
+        // 但为留安全余量，单次查询限制在 PROM_MAX_POINTS-1 个 interval（11000 点）。
+        if estimated_points < PROM_MAX_POINTS {
             return self.query_range_single(promql, start, end, step).await;
         }
 

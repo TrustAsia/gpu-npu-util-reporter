@@ -404,6 +404,20 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
         // 校验显存策略中的指标名
         validate_memory_metrics(&spec.memory, key, path)?;
     }
+    // 校验 sources[].device_types 引用的设备类型在 devices 中存在
+    for src in &cfg.sources {
+        for dt in &src.device_types {
+            if !cfg.devices.contains_key(dt) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "数据源「{}」的 device_types 引用了未定义的设备类型「{}」",
+                        src.name, dt
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -691,6 +705,16 @@ mod tests {
             .card_id_label = "gpu\",foo=\"bar".into();
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "含特殊字符的标签名应被拒绝");
+    }
+
+    #[test]
+    fn config_rejects_undefined_device_type() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].device_types.push("nonexistent_device".into());
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "引用未定义的设备类型应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("nonexistent_device"), "错误信息应包含设备类型名");
     }
 
     #[test]

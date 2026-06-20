@@ -346,9 +346,15 @@ async fn fallback_composite_ratio(
         .into_iter()
         .filter_map(|(key, u_opt)| {
             let u = u_opt?;
-            let f_opt = free_by_key.get(&key).and_then(|opt| opt.as_ref())?;
+            let f_opt = free_by_key.get(&key).and_then(|opt| opt.as_ref());
+            if f_opt.is_none() {
+                ctx.out.push_warning(format!(
+                    "CompositeRatio fallback：设备 {key} 有 used 数据但无 free 数据，跳过显存计算"
+                ));
+                return None;
+            }
             // 合成 total = used + free 的伪 Series（逐点相加）
-            let total = synthesize_total(&u, f_opt);
+            let total = synthesize_total(&u, f_opt.unwrap());
             Some(processor::hbm_fallback_series(&u, &total))
         })
         .collect()
