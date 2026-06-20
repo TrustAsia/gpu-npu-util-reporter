@@ -179,8 +179,8 @@ pub fn nvidia_a10_spec() -> DeviceSpec {
         memory: MemoryStrategy::composite_ratio("DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"),
         card_id_label: "gpu".into(),
         labels: LabelMapping {
-            host_ip: "ip".into(),
-            node_name: "node".into(),
+            host_ip: "host_ip".into(),
+            node_name: "pod_node".into(),
             container: "container".into(),
             pod: "pod".into(),
             namespace: "namespace".into(),
@@ -206,8 +206,8 @@ pub fn ascend_910b_spec() -> DeviceSpec {
         ),
         card_id_label: "id".into(),
         labels: LabelMapping {
-            host_ip: "ip".into(),
-            node_name: "node".into(),
+            host_ip: "host_ip".into(),
+            node_name: "endpoint_node".into(),
             container: "container_name".into(),
             pod: "pod_name".into(),
             namespace: "namespace".into(),

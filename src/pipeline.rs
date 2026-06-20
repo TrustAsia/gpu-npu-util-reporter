@@ -727,11 +727,11 @@ mod tests {
     async fn card_with_only_memory_keeps_identity_from_mem() {
         // 核心: 一张卡 gpu=0；显存: 同一张卡。只测 mem 路径身份提取正确。
         let core = vec![Series {
-            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1"), ("node", "n1")]),
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1"), ("pod_node", "n1")]),
             points: vec![(t(0), 10.0)],
         }];
         let mem = vec![Series {
-            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1"), ("node", "n1")]),
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1"), ("pod_node", "n1")]),
             points: vec![(t(0), 20.0)],
         }];
         let fetcher = MockFetcher::new()
@@ -822,21 +822,21 @@ mod tests {
         // 满足核心聚合（pod-a 的点 10.0）与归属末态（pod-b 更晚）。
         let core_series = vec![
             Series {
-                labels: labels(&[("id", "0"), ("ip", "1.1.1.1"), ("pod_name", "pod-a")]),
+                labels: labels(&[("id", "0"), ("host_ip", "1.1.1.1"), ("pod_name", "pod-a")]),
                 points: vec![(t(0), 10.0)],
             },
             Series {
-                labels: labels(&[("id", "0"), ("ip", "1.1.1.1"), ("pod_name", "pod-b")]),
+                labels: labels(&[("id", "0"), ("host_ip", "1.1.1.1"), ("pod_name", "pod-b")]),
                 points: vec![(t(60), 30.0)],
             },
         ];
         let mem_direct: Vec<Series> = Vec::new(); // 触发 fallback 走 total
         let used = vec![Series {
-            labels: labels(&[("__name__", "hbm_used"), ("id", "0"), ("ip", "1.1.1.1")]),
+            labels: labels(&[("__name__", "hbm_used"), ("id", "0"), ("host_ip", "1.1.1.1")]),
             points: vec![(t(0), 50.0)],
         }];
         let total = vec![Series {
-            labels: labels(&[("__name__", "hbm_total"), ("id", "0"), ("ip", "1.1.1.1")]),
+            labels: labels(&[("__name__", "hbm_total"), ("id", "0"), ("host_ip", "1.1.1.1")]),
             points: vec![(t(0), 200.0)],
         }];
         let fetcher = MockFetcher::new()
@@ -867,7 +867,7 @@ mod tests {
     async fn records_sorted_by_key() {
         // 故意以乱序提供三张卡，验证输出按 (ip,card_id) 升序。
         let make = |ip: &str, card: &str, val: f64| Series {
-            labels: labels(&[("gpu", card), ("ip", ip)]),
+            labels: labels(&[("gpu", card), ("host_ip", ip)]),
             points: vec![(t(0), val)],
         };
         let core = vec![
@@ -1025,7 +1025,7 @@ mod tests {
         let mem_series = vec![Series {
             labels: labels(&[
                 ("gpu", "0"),
-                ("ip", "1.1.1.1"),
+                ("host_ip", "1.1.1.1"),
                 ("namespace", "ns-mem"),
                 ("pod", "pod-mem"),
                 ("container", "c-mem"),
@@ -1192,11 +1192,11 @@ mod tests {
         // 核心指标查询匹配 "DCGM_FI_DEV_GPU_UTIL" 返回两条 series（用于聚合），
         // 但归属查询是带 ip 过滤的 PromQL，通过匹配更具体的子串返回单主机数据。
         let host_a_series = vec![Series {
-            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1"), ("pod", "pod-a")]),
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1"), ("pod", "pod-a")]),
             points: vec![(t(0), 10.0)],
         }];
         let host_b_series = vec![Series {
-            labels: labels(&[("gpu", "0"), ("ip", "2.2.2.2"), ("pod", "pod-b")]),
+            labels: labels(&[("gpu", "0"), ("host_ip", "2.2.2.2"), ("pod", "pod-b")]),
             points: vec![(t(60), 30.0)],
         }];
         // 核心查询（首次注册，按子串首次命中）：两条 series 都返回用于聚合
@@ -1205,11 +1205,11 @@ mod tests {
             host_b_series[0].clone(),
         ];
         let fetcher = MockFetcher::new()
-            // 归属查询带 ip="1.1.1.1" → 匹配此注册（更具体的子串先注册）
-            .when(r#"ip="1.1.1.1""#, Ok(host_a_series))
-            // 归属查询带 ip="2.2.2.2" → 匹配此注册
-            .when(r#"ip="2.2.2.2""#, Ok(host_b_series))
-            // 核心指标查询（不含 ip= 过滤）→ 匹配此注册
+            // 归属查询带 host_ip="1.1.1.1" → 匹配此注册（更具体的子串先注册）
+            .when(r#"host_ip="1.1.1.1""#, Ok(host_a_series))
+            // 归属查询带 host_ip="2.2.2.2" → 匹配此注册
+            .when(r#"host_ip="2.2.2.2""#, Ok(host_b_series))
+            // 核心指标查询（不含 host_ip= 过滤）→ 匹配此注册
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(core_series));
         let spec = crate::devices::nvidia_a10_spec();
         let cfg = cfg_with_mode("last_in_range");
