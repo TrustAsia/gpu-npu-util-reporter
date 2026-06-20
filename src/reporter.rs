@@ -127,6 +127,7 @@ pub fn render_to_buffer<S: BuildHasher>(
             // 累计该列内容的显示宽度（I6）。
             let text = match &v {
                 CellValue::Pct(p) => format_pct_text(*p),
+                CellValue::Count(n) => n.to_string(),
                 CellValue::Text(t) => t.clone(),
                 CellValue::Na => "N/A".into(),
             };
@@ -141,6 +142,15 @@ pub fn render_to_buffer<S: BuildHasher>(
                         .write_number_with_format(excel_row, col, p / 100.0, &fmt)
                         .map_err(|e| AppError::Report {
                             detail: format!("写单元格失败：{e}"),
+                        })?;
+                }
+                CellValue::Count(n) => {
+                    #[allow(clippy::cast_precision_loss)]
+                    let val = n as f64;
+                    sheet
+                        .write_number(excel_row, col, val)
+                        .map_err(|e| AppError::Report {
+                            detail: format!("写数据量失败：{e}"),
                         })?;
                 }
                 CellValue::Text(t) => {
@@ -185,6 +195,8 @@ pub fn render_to_buffer<S: BuildHasher>(
 /// 避免依赖 `rust_xlsxwriter` 的日期时间转换 API。
 enum CellValue {
     Pct(f64),
+    /// 数据量（整数），以普通数字写入 Excel。
+    Count(usize),
     Text(String),
     Na,
 }
@@ -218,10 +230,32 @@ fn cell_value(
             .core_peak_time
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
+        "核心利用率数据量" => rec
+            .core_count
+            .map_or(CellValue::Na, CellValue::Count),
+        "核心利用率首条数据时间" => rec
+            .core_first_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "核心利用率末条数据时间" => rec
+            .core_last_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
         "显存占用率平均值" => rec.mem_avg.map_or(CellValue::Na, CellValue::Pct),
         "显存占用率峰值" => rec.mem_peak.map_or(CellValue::Na, CellValue::Pct),
         "显存占用率峰值出现时间" => rec
             .mem_peak_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "显存占用率数据量" => rec
+            .mem_count
+            .map_or(CellValue::Na, CellValue::Count),
+        "显存占用率首条数据时间" => rec
+            .mem_first_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "显存占用率末条数据时间" => rec
+            .mem_last_time
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
         other => {

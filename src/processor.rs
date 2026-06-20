@@ -39,6 +39,18 @@ pub struct CardRecord {
     pub mem_peak: Option<f64>,
     /// 显存峰值出现时间。
     pub mem_peak_time: Option<DateTime<Utc>>,
+    /// 核心利用率数据点数量。None = N/A。
+    pub core_count: Option<usize>,
+    /// 核心利用率第一条数据时间。None = N/A。
+    pub core_first_time: Option<DateTime<Utc>>,
+    /// 核心利用率最后一条数据时间。None = N/A。
+    pub core_last_time: Option<DateTime<Utc>>,
+    /// 显存占用率数据点数量。None = N/A。
+    pub mem_count: Option<usize>,
+    /// 显存占用率第一条数据时间。None = N/A。
+    pub mem_first_time: Option<DateTime<Utc>>,
+    /// 显存占用率最后一条数据时间。None = N/A。
+    pub mem_last_time: Option<DateTime<Utc>>,
     /// 取值时间范围起点。
     pub range_start: DateTime<Utc>,
     /// 取值时间范围终点。
@@ -63,19 +75,31 @@ pub struct MetricStats {
     pub peak: f64,
     /// 峰值出现时间。
     pub peak_time: DateTime<Utc>,
+    /// 参与计算的数据点数量。
+    pub count: usize,
+    /// 第一条数据的时间戳。
+    pub first_time: DateTime<Utc>,
+    /// 最后一条数据的时间戳。
+    pub last_time: DateTime<Utc>,
 }
 
 /// 对一组点做均值/峰值/峰值时间聚合。
 ///
 /// 空输入返回 `None`。峰值取最大值；多个点同为最大时取最早的时间戳（稳定）。
+///
+/// # Panics
+///
+/// 当 `points` 非空时内部使用 `unwrap()` 取 `min`/`max` 时间戳——非空迭代器保证安全。
 #[must_use]
+#[allow(clippy::missing_panics_doc)]
 pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
     if points.is_empty() {
         return None;
     }
+    let count = points.len();
     let sum: f64 = points.iter().map(|(_, v)| *v).sum();
     #[allow(clippy::cast_precision_loss)]
-    let avg = sum / points.len() as f64;
+    let avg = sum / count as f64;
     // 取最大值；并列取最早时间戳（va 相同时 tb 越小越优先 → .then(tb.cmp(ta))）。
     // max_by 对非空迭代器必返回 Some；这里用 match 显式处理，避免 expect/panic。
     let best = points.iter().copied().max_by(|(ta, va), (tb, vb)| {
@@ -83,10 +107,24 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(tb.cmp(ta))
     });
+    // 首/末数据时间：按时间戳排序取最早和最晚
+    let first_time = points
+        .iter()
+        .map(|(ts, _)| *ts)
+        .min()
+        .unwrap(); // 非空迭代器，min 必返回 Some
+    let last_time = points
+        .iter()
+        .map(|(ts, _)| *ts)
+        .max()
+        .unwrap();
     best.map(|(peak_time, peak)| MetricStats {
         avg,
         peak,
         peak_time,
+        count,
+        first_time,
+        last_time,
     })
 }
 

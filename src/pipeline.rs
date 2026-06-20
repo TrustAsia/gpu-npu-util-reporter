@@ -196,12 +196,12 @@ pub async fn collect_device(
             .and_then(|s| s.labels.get(&ctx.spec.labels.node_name).cloned())
             .unwrap_or_default();
 
-        let (c_avg, c_peak, c_peak_t) = core
+        let (c_avg, c_peak, c_peak_t, c_count, c_first, c_last) = core
             .as_ref()
-            .map_or((None, None, None), |c| stat3(&c.points));
-        let (m_avg, m_peak, m_peak_t) = mem
+            .map_or((None, None, None, None, None, None), |c| stat3(&c.points));
+        let (m_avg, m_peak, m_peak_t, m_count, m_first, m_last) = mem
             .as_ref()
-            .map_or((None, None, None), |m| stat3(&m.points));
+            .map_or((None, None, None, None, None, None), |m| stat3(&m.points));
 
         // 归属
         let (namespace, pod, container) =
@@ -219,9 +219,15 @@ pub async fn collect_device(
             core_avg: c_avg,
             core_peak: c_peak,
             core_peak_time: c_peak_t,
+            core_count: c_count,
+            core_first_time: c_first,
+            core_last_time: c_last,
             mem_avg: m_avg,
             mem_peak: m_peak,
             mem_peak_time: m_peak_t,
+            mem_count: m_count,
+            mem_first_time: m_first,
+            mem_last_time: m_last,
             range_start: ctx.start,
             range_end: ctx.end,
         });
@@ -530,10 +536,27 @@ fn last_label_value(series: &[Series], label: &str) -> String {
     last_non_empty(&tagged)
 }
 
-/// 把一组点聚合成 (avg, peak, `peak_time`)，空则全 None。
-fn stat3(points: &[(DateTime<Utc>, f64)]) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
-    aggregate(points).map_or((None, None, None), |s| {
-        (Some(s.avg), Some(s.peak), Some(s.peak_time))
+/// 把一组点聚合成 (avg, peak, `peak_time`, count, `first_time`, `last_time`)，空则全 None。
+#[allow(clippy::type_complexity)]
+fn stat3(
+    points: &[(DateTime<Utc>, f64)],
+) -> (
+    Option<f64>,
+    Option<f64>,
+    Option<DateTime<Utc>>,
+    Option<usize>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+) {
+    aggregate(points).map_or((None, None, None, None, None, None), |s| {
+        (
+            Some(s.avg),
+            Some(s.peak),
+            Some(s.peak_time),
+            Some(s.count),
+            Some(s.first_time),
+            Some(s.last_time),
+        )
     })
 }
 

@@ -27,9 +27,15 @@ pub const BASE_COLUMNS: &[&str] = &[
     "核心利用率平均值",
     "核心利用率峰值",
     "核心利用率峰值出现时间",
+    "核心利用率数据量",
+    "核心利用率首条数据时间",
+    "核心利用率末条数据时间",
     "显存占用率平均值",
     "显存占用率峰值",
     "显存占用率峰值出现时间",
+    "显存占用率数据量",
+    "显存占用率首条数据时间",
+    "显存占用率末条数据时间",
 ];
 
 /// 列插入位置：相对于某锚点列的前/后。
@@ -344,9 +350,15 @@ mod tests {
             core_avg: None,
             core_peak: None,
             core_peak_time: None,
+            core_count: None,
+            core_first_time: None,
+            core_last_time: None,
             mem_avg: None,
             mem_peak: None,
             mem_peak_time: None,
+            mem_count: None,
+            mem_first_time: None,
+            mem_last_time: None,
             range_start: Utc.timestamp_opt(0, 0).unwrap(),
             range_end: Utc.timestamp_opt(60, 0).unwrap(),
         }
