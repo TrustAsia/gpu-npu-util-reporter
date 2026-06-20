@@ -22,6 +22,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"  # deprecated; migrate to serde_yaml_neo when API stabilizes
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 csv = "1"

@@ -141,7 +141,7 @@ src/
 ## 开发
 
 ```bash
-cargo test          # 65 个测试（64 单元 + 1 端到端渲染回读）
+cargo test          # 71 个测试（70 单元 + 1 端到端渲染回读）
 cargo clippy        # 零 warning
 ```
 

@@ -119,13 +119,9 @@ impl MetricFetcher for PrometheusFetcher {
             url: self.base_url.clone(),
             detail: format!("HTTP 请求失败：{e}"),
         })?;
-        check_response_size(&resp, &self.source_name, &self.base_url)?;
-        let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
-            source_name: self.source_name.clone(),
-            url: self.base_url.clone(),
-            detail: format!("解析响应失败：{e}"),
-        })?;
-        parse_response(body, &self.source_name)
+        let data: PromResponse =
+            read_limited_json(resp, &self.source_name, &self.base_url).await?;
+        parse_response(data, &self.source_name)
     }
 
     async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError> {
@@ -147,18 +143,17 @@ impl MetricFetcher for PrometheusFetcher {
             url: self.base_url.clone(),
             detail: format!("HTTP 请求失败：{e}"),
         })?;
-        check_response_size(&resp, &self.source_name, &self.base_url)?;
-        let body: PromResponse = resp.json().await.map_err(|e| AppError::Prometheus {
-            source_name: self.source_name.clone(),
-            url: self.base_url.clone(),
-            detail: format!("解析响应失败：{e}"),
-        })?;
-        parse_response(body, &self.source_name)
+        let data: PromResponse =
+            read_limited_json(resp, &self.source_name, &self.base_url).await?;
+        parse_response(data, &self.source_name)
     }
 }
 
-/// 检查响应体大小，防止异常大响应耗尽内存。
-fn check_response_size(
+/// 检查响应体大小限制（基于 Content-Length 头的快速拒绝）。
+///
+/// 实际大小校验在 [`read_limited_json`] 中读取字节后完成，
+/// 防止 chunked 传输绕过 Content-Length 检查。
+fn check_response_size_header(
     resp: &reqwest::Response,
     source_name: &str,
     url: &str,
@@ -173,6 +168,38 @@ fn check_response_size(
         }
     }
     Ok(())
+}
+
+/// 读取响应体字节，校验实际大小（防止 chunked 传输绕过 Content-Length），
+/// 然后反序列化为指定类型。
+async fn read_limited_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    source_name: &str,
+    url: &str,
+) -> Result<T, AppError> {
+    check_response_size_header(&resp, source_name, url)?;
+    let body = resp.bytes().await.map_err(|e| AppError::Prometheus {
+        source_name: source_name.into(),
+        url: url.into(),
+        detail: format!("读取响应体失败：{e}"),
+    })?;
+    // 实际大小校验：chunked 传输无 Content-Length，必须读完后检查。
+    #[allow(clippy::cast_possible_truncation)]
+    if body.len() > MAX_RESPONSE_BYTES as usize {
+        return Err(AppError::Prometheus {
+            source_name: source_name.into(),
+            url: url.into(),
+            detail: format!(
+                "响应体过大（{} 字节，上限 {MAX_RESPONSE_BYTES} 字节）",
+                body.len()
+            ),
+        });
+    }
+    serde_json::from_slice(&body).map_err(|e| AppError::Prometheus {
+        source_name: source_name.into(),
+        url: url.into(),
+        detail: format!("解析响应失败：{e}"),
+    })
 }
 
 /// 把 Prometheus 响应转成 Series 列表。Vector 形式当作单点序列。

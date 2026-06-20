@@ -214,6 +214,7 @@ pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
 }
 
 /// 校验配置合法性。
+#[allow(clippy::too_many_lines)]
 fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
     if cfg.report.query_step_secs == 0 {
         return Err(AppError::Config {
@@ -261,7 +262,150 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             });
         }
     }
+    // 校验设备配方中指标名/标签名的合法性，防止 PromQL 注入。
+    // Prometheus 指标名: [a-zA-Z_:][a-zA-Z0-9_:]*
+    // 标签名: [a-zA-Z_][a-zA-Z0-9_]*
+    for (key, spec) in &cfg.devices {
+        if !is_valid_metric_name(&spec.core_util_metric) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{}.core_util_metric「{}」不是合法的 Prometheus 指标名（仅允许字母/数字/下划线/冒号）",
+                    key, spec.core_util_metric
+                ),
+            });
+        }
+        if !is_valid_label_name(&spec.card_id_label) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{}.card_id_label「{}」不是合法的 Prometheus 标签名（仅允许字母/数字/下划线）",
+                    key, spec.card_id_label
+                ),
+            });
+        }
+        if !is_valid_label_name(&spec.labels.host_ip) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{}.labels.host_ip「{}」不是合法的 Prometheus 标签名",
+                    key, spec.labels.host_ip
+                ),
+            });
+        }
+        if !is_valid_label_name(&spec.labels.node_name) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{}.labels.node_name「{}」不是合法的 Prometheus 标签名",
+                    key, spec.labels.node_name
+                ),
+            });
+        }
+        if !is_valid_label_name(&spec.labels.container) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{}.labels.container「{}」不是合法的 Prometheus 标签名",
+                    key, spec.labels.container
+                ),
+            });
+        }
+        if !is_valid_label_name(&spec.labels.pod) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{}.labels.pod「{}」不是合法的 Prometheus 标签名",
+                    key, spec.labels.pod
+                ),
+            });
+        }
+        if !is_valid_label_name(&spec.labels.namespace) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{}.labels.namespace「{}」不是合法的 Prometheus 标签名",
+                    key, spec.labels.namespace
+                ),
+            });
+        }
+        // 校验显存策略中的指标名
+        validate_memory_metrics(&spec.memory, key, path)?;
+    }
     Ok(())
+}
+
+/// 校验显存策略中所有指标名的合法性（递归，因 fallback 嵌套）。
+fn validate_memory_metrics(
+    strategy: &crate::devices::MemoryStrategy,
+    device_key: &str,
+    path: &str,
+) -> Result<(), AppError> {
+    match strategy {
+        crate::devices::MemoryStrategy::CompositeRatio(b) => {
+            for name in [&b.composite_ratio.used, &b.composite_ratio.free] {
+                if !is_valid_metric_name(name) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "devices.{device_key}.memory 指标名「{name}」不合法（仅允许字母/数字/下划线/冒号）"
+                        ),
+                    });
+                }
+            }
+        }
+        crate::devices::MemoryStrategy::DirectMetric(b) => {
+            if !is_valid_metric_name(&b.direct_metric.metric) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "devices.{}.memory 指标名「{}」不合法",
+                        device_key, b.direct_metric.metric
+                    ),
+                });
+            }
+            if let Some(fb) = &b.direct_metric.fallback {
+                validate_memory_metrics(fb, device_key, path)?;
+            }
+        }
+        crate::devices::MemoryStrategy::CompositeFromTotal(b) => {
+            for name in [&b.composite_from_total.used, &b.composite_from_total.total] {
+                if !is_valid_metric_name(name) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "devices.{device_key}.memory 指标名「{name}」不合法"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Prometheus 指标名合法性：`[a-zA-Z_:][a-zA-Z0-9_:]*`
+fn is_valid_metric_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' && first != ':' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+}
+
+/// Prometheus 标签名合法性：`[a-zA-Z_][a-zA-Z0-9_]*`
+fn is_valid_label_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// 用 CLI 覆盖配置字段（start/end/output）。
@@ -428,5 +572,58 @@ mod tests {
         assert!(r.is_err(), "无协议前缀的 URL 应被拒绝");
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("http://") || msg.contains("https://"), "提示应含协议要求");
+    }
+
+    #[test]
+    fn config_rejects_invalid_metric_name() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        // 注入含 PromQL 特殊字符的指标名
+        cfg.devices
+            .get_mut("nvidia_a10")
+            .unwrap()
+            .core_util_metric = "metric{evil=\"yes\"}".into();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "含特殊字符的指标名应被拒绝");
+    }
+
+    #[test]
+    fn config_rejects_invalid_label_name() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices
+            .get_mut("nvidia_a10")
+            .unwrap()
+            .card_id_label = "gpu\",foo=\"bar".into();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "含特殊字符的标签名应被拒绝");
+    }
+
+    #[test]
+    fn config_accepts_valid_metric_and_label_names() {
+        // 默认配置的指标名/标签名都应通过校验
+        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        assert!(validate_config(&cfg, "test.yaml").is_ok());
+    }
+
+    #[test]
+    fn is_valid_metric_name_accepts_standard_names() {
+        assert!(is_valid_metric_name("DCGM_FI_DEV_GPU_UTIL"));
+        assert!(is_valid_metric_name("npu_chip_info_utilization"));
+        assert!(is_valid_metric_name(":metric:with:colons:"));
+        assert!(is_valid_metric_name("_starts_with_underscore"));
+        assert!(!is_valid_metric_name("")); // 空
+        assert!(!is_valid_metric_name("1starts_with_digit"));
+        assert!(!is_valid_metric_name("metric with space"));
+        assert!(!is_valid_metric_name("metric{evil}"));
+    }
+
+    #[test]
+    fn is_valid_label_name_accepts_standard_names() {
+        assert!(is_valid_label_name("gpu"));
+        assert!(is_valid_label_name("container_name"));
+        assert!(is_valid_label_name("_private"));
+        assert!(!is_valid_label_name("")); // 空
+        assert!(!is_valid_label_name("1digit"));
+        assert!(!is_valid_label_name("label:colon")); // 冒号不允许在标签名中
+        assert!(!is_valid_label_name("label\"quote"));
     }
 }

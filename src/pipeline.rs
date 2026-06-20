@@ -340,8 +340,13 @@ async fn ownership_for(
 
     // LastInRange：按 card_id 过滤重新拉取该卡的归属时序。Pod 漂移会产出
     // 多条 series（每条带不同归属标签集），按点的最大时间戳排序取末态非空。
-    // 对 card_id 值做 PromQL 转义，防止标签值中的引号/反斜杠破坏查询语法。
-    let escaped = card_id.replace('\\', "\\\\").replace('"', "\\\"");
+    // 对 card_id 值做 PromQL 转义，防止标签值中的引号/反斜杠/换行破坏查询语法。
+    let escaped = card_id
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     let promql = format!(
         "{metric}{{{a}=\"{v}\"}}",
         metric = ctx.spec.core_util_metric,

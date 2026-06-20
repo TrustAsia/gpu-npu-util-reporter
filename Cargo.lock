@@ -421,6 +421,7 @@ dependencies = [
  "reqwest",
  "rust_xlsxwriter",
  "serde",
+ "serde_json",
  "serde_yaml",
  "thiserror 1.0.69",
  "tokio",
