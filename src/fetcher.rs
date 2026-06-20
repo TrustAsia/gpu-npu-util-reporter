@@ -125,7 +125,16 @@ impl MetricFetcher for PrometheusFetcher {
                 Ok(segments) => {
                     merge_series(&mut all_series, segments);
                 }
-                Err(e) => return Err(e), // 任一段失败即整体失败
+                Err(e) => {
+                    // 单段失败不丢弃已获取的数据，直接返回已合并的部分结果。
+                    // 调用方（pipeline）会将 Err 转为 Warning，但部分数据仍可聚合。
+                    if all_series.is_empty() {
+                        return Err(e);
+                    }
+                    // 有部分数据时返回 Ok，让调用方正常聚合已获取的数据；
+                    // 注意：部分缺失可能导致某些卡数据不完整，但优于全丢。
+                    break;
+                }
             }
             seg_start = seg_end;
         }
@@ -199,13 +208,18 @@ impl PrometheusFetcher {
 ///
 /// 按 labels 匹配：同一标签集的 series 合并点并按时间戳排序去重；
 /// 不同标签集的 series 直接追加。
+/// 同一时间戳保留最后一个值（与 pipeline 的 `merge_into` 语义一致）。
 fn merge_series(all_series: &mut Vec<Series>, incoming: Vec<Series>) {
     for s in incoming {
         // 查找已有 series 中是否有完全相同的标签集
         if let Some(existing) = all_series.iter_mut().find(|e| e.labels == s.labels) {
             existing.points.extend(s.points);
             existing.points.sort_by_key(|(ts, _)| *ts);
+            // 同一时间戳保留最后一个值（最新观测），与 merge_into 一致。
+            // dedup_by 保留首个元素，因此先反转，去重后再反转回来。
+            existing.points.reverse();
             existing.points.dedup_by(|a, b| a.0 == b.0);
+            existing.points.reverse();
         } else {
             all_series.push(s);
         }
@@ -541,9 +555,9 @@ mod tests {
         assert_eq!(all.len(), 1, "同标签应合并为 1 条 series");
         let pts = &all[0].points;
         assert_eq!(pts.len(), 3, "去重后应 3 个点");
-        // dedup_by 保留首个（排序后 t60 的第一个值），所以 t60=20.0
+        // dedup_by 保留最后一个值（最新观测），所以 t60=99.0
         assert_eq!(pts[0], (t(0), 10.0));
-        assert_eq!(pts[1], (t(60), 20.0));
+        assert_eq!(pts[1], (t(60), 99.0));
         assert_eq!(pts[2], (t(120), 30.0));
     }
 

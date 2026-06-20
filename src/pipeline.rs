@@ -389,6 +389,7 @@ async fn query_with_ip_fallback(
     metric: &str,
     escaped_card_id: &str,
     ip_escaped: &str,
+    host_ip: &str,
 ) -> Option<Vec<Series>> {
     // host_ip 为空时无法安全过滤，跳过归属查询避免跨主机污染
     if ip_escaped.is_empty() {
@@ -407,15 +408,14 @@ async fn query_with_ip_fallback(
             // 回退：用 instance 标签（IP 可能从 instance 解析而来）。
             // instance 格式为 "ip:port" 或 "[ipv6]:port"，用正则精确匹配
             // 避免 IP 前缀误匹配（如 "1.1" 不应匹配 "1.1.1.1:9090"）。
-            // Prometheus 正则中 . 是通配符，需转义为 \.。
-            // IPv6：extract_ip 剥去方括号（[2001:db8::1]:9090 → 2001:db8::1），
-            // 但 instance 原值含方括号，正则需重新加回。
-            let ip_escaped_dots = ip_escaped.replace('.', r"\.");
-            let ip_regex = if ip_escaped.contains(':') {
+            // 对 IP 做完整 Prometheus 正则转义（RE2 语法），防御性处理
+            // 含特殊字符的标签值。IPv6 方括号需单独处理。
+            let ip_regex_escaped = escape_promql_regex(host_ip);
+            let ip_regex = if host_ip.contains(':') {
                 // IPv6：instance 为 [ip]:port，正则需匹配方括号
-                format!(r"^\[{ip_escaped_dots}\]:")
+                format!(r"^\[{ip_regex_escaped}\]:")
             } else {
-                format!("^{ip_escaped_dots}:")
+                format!("^{ip_regex_escaped}:")
             };
             let instance_promql = format!(
                 "{metric}{{{a}=\"{v}\",instance=~\"{ip_re}\"}}",
@@ -493,7 +493,7 @@ async fn ownership_for(
 
     // 优先用核心指标查归属，含 instance 标签回退
     if let Some(series) =
-        query_with_ip_fallback(ctx, &ctx.spec.core_util_metric, &escaped, &ip_escaped).await
+        query_with_ip_fallback(ctx, &ctx.spec.core_util_metric, &escaped, &ip_escaped, host_ip).await
     {
         let ns = last_label_value(&series, &ctx.spec.labels.namespace);
         let pod = last_label_value(&series, &ctx.spec.labels.pod);
@@ -507,7 +507,7 @@ async fn ownership_for(
     let mem_names = ctx.spec.memory.ownership_metric_names();
     for mem_metric in &mem_names {
         if let Some(mem_series) =
-            query_with_ip_fallback(ctx, mem_metric, &escaped, &ip_escaped).await
+            query_with_ip_fallback(ctx, mem_metric, &escaped, &ip_escaped, host_ip).await
         {
             let ns = last_label_value(&mem_series, &ctx.spec.labels.namespace);
             let pod = last_label_value(&mem_series, &ctx.spec.labels.pod);
@@ -600,6 +600,21 @@ pub(crate) fn extract_ip(labels: &HashMap<String, String>, prefer: &str) -> Stri
             s.clone()
         })
         .unwrap_or_default()
+}
+
+/// 对字符串做 Prometheus 正则转义（RE2 语法）。
+///
+/// 转义所有正则元字符，使字符串在 `=~` 匹配中被当作字面量。
+/// Prometheus 使用 RE2 引擎，元字符为：`\ . ^ $ * + ? ( ) [ ] { } |`
+fn escape_promql_regex(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
