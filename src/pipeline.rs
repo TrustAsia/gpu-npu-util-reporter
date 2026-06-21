@@ -338,10 +338,14 @@ async fn fallback_composite_from_total_inner(
         .into_iter()
         .filter_map(|(key, u_opt)| {
             let u = u_opt?;
-            total_by_key
-                .get(&key)
-                .and_then(|opt| opt.as_ref())
-                .map(|t| processor::hbm_fallback_series(&u, t))
+            let t_opt = total_by_key.get(&key).and_then(|opt| opt.as_ref());
+            if t_opt.is_none() {
+                ctx.out.push_warning(format!(
+                    "CompositeFromTotal fallback：设备 {key} 有 used 数据但无 total 数据，跳过显存计算"
+                ));
+                return None;
+            }
+            Some(processor::hbm_fallback_series(&u, t_opt.unwrap()))
         })
         .collect()
 }
@@ -1393,5 +1397,42 @@ mod tests {
         assert!(r.mem_avg.is_some(), "显存不应为 N/A（CompositeRatio fallback 应生效）");
         assert!((r.mem_avg.unwrap() - 17.5).abs() < 1e-9);
         assert!((r.mem_peak.unwrap() - 20.0).abs() < 1e-9);
+    }
+
+    // ---- CompositeFromTotal fallback：有 used 无 total 时应发 Warning ----
+
+    #[tokio::test]
+    async fn composite_from_total_warns_when_total_missing() {
+        // NPU 卡有 used 数据但 total 数据缺失 → 显存 N/A + Warning
+        let used = vec![Series {
+            labels: labels(&[
+                ("__name__", "npu_chip_info_hbm_used_memory"),
+                ("id", "0"),
+                ("host_ip", "1.1.1.1"),
+            ]),
+            points: vec![(t(0), 50.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("npu_chip_info_utilization", Ok(vec![])) // 核心为空（聚焦 fallback）
+            .when("npu_chip_info_hbm_utilization", Ok(vec![])) // direct 为空触发 fallback
+            .when("npu_chip_info_hbm_used_memory", Ok(used))
+            .when("npu_chip_info_hbm_total_memory", Ok(vec![])); // total 为空
+        let spec = crate::devices::ascend_910b_spec();
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "npu",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert!(
+            out.warnings.iter().any(|w| w.contains("used") && w.contains("total")),
+            "有 used 无 total 时应发 Warning，实际：{:?}",
+            out.warnings
+        );
     }
 }
