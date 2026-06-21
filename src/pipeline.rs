@@ -278,13 +278,42 @@ async fn fetch_with_warning(ctx: &mut QueryContext<'_>, promql: &str) -> Vec<Ser
 /// 标签（used 与 total 的 `__name__` 不同），全 label 相等永远不成立，会导致
 /// fallback 静默产出 0 点。改为按设备 join key 对齐。
 async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrategy) -> Vec<Series> {
-    let (used_metric, total_metric) = match fallback {
-        MemoryStrategy::CompositeFromTotal(body) => (
-            body.composite_from_total.used.as_str(),
-            body.composite_from_total.total.as_str(),
-        ),
-        _ => return Vec::new(),
-    };
+    match fallback {
+        MemoryStrategy::CompositeFromTotal(body) => {
+            fallback_composite_from_total_inner(
+                ctx,
+                body.composite_from_total.used.as_str(),
+                body.composite_from_total.total.as_str(),
+            )
+            .await
+        }
+        MemoryStrategy::CompositeRatio(b) => {
+            // DirectMetric 的 fallback 为 CompositeRatio 时，委托给
+            // fallback_composite_ratio 按 used/free 重算。
+            fallback_composite_ratio(ctx, &b.composite_ratio).await
+        }
+        MemoryStrategy::DirectMetric(b) => {
+            // DirectMetric 嵌套 DirectMetric 时，递归尝试其 fallback。
+            // Box::pin 因为递归 async fn 需要间接层以避免无限大小的 future。
+            if let Some(inner_fb) = &b.direct_metric.fallback {
+                Box::pin(fallback_used_total(ctx, inner_fb.as_ref())).await
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// `CompositeFromTotal` 的核心查询+join 逻辑：拉 used/total，按 (`host_ip`, `card_id`)
+/// 对齐重算显存占用率（C3 修复）。
+///
+/// 从 `fallback_used_total` 抽出，因为 `fallback_used_total` 现在是分派函数，
+/// 需要把 `CompositeFromTotal` 的实际逻辑放在独立函数中。
+async fn fallback_composite_from_total_inner(
+    ctx: &mut QueryContext<'_>,
+    used_metric: &str,
+    total_metric: &str,
+) -> Vec<Series> {
     let used_s = fetch_with_warning(ctx, used_metric).await;
     let total_s = fetch_with_warning(ctx, total_metric).await;
 
@@ -1298,5 +1327,71 @@ mod tests {
         let total = synthesize_total(&used, &free);
         assert_eq!(total.points.len(), 1, "total=0 和 Inf 应被跳过");
         assert!((total.points[0].1 - 200.0).abs() < 1e-9); // t120: 50+150=200
+    }
+
+    // ---- DirectMetric 的 fallback 为 CompositeRatio 时不应静默丢失 ----
+
+    #[tokio::test]
+    async fn direct_metric_composite_ratio_fallback_not_silent() {
+        // 自定义设备：DirectMetric 主指标为空，fallback 为 CompositeRatio(used, free)。
+        // 修复前 fallback_used_total 对 CompositeRatio 返回空 Vec，显存静默丢失。
+        let used = vec![Series {
+            labels: labels(&[
+                ("__name__", "custom_hbm_used"),
+                ("gpu", "0"),
+                ("host_ip", "1.1.1.1"),
+            ]),
+            points: vec![(t(0), 30.0), (t(60), 60.0)],
+        }];
+        let free = vec![Series {
+            labels: labels(&[
+                ("__name__", "custom_hbm_free"),
+                ("gpu", "0"),
+                ("host_ip", "1.1.1.1"),
+            ]),
+            points: vec![(t(0), 170.0), (t(60), 240.0)],
+        }];
+        let core = vec![Series {
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("custom_core_util", Ok(core))
+            .when("custom_hbm_direct", Ok(vec![])) // direct 为空，触发 fallback
+            .when("custom_hbm_used", Ok(used))
+            .when("custom_hbm_free", Ok(free));
+        let spec = DeviceSpec {
+            display_name: "Custom GPU".into(),
+            core_util_metric: "custom_core_util".into(),
+            memory: MemoryStrategy::direct(
+                "custom_hbm_direct",
+                Some(MemoryStrategy::composite_ratio("custom_hbm_used", "custom_hbm_free")),
+            ),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "host_ip".into(),
+                node_name: "node".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "n".into(),
+            },
+        };
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert_eq!(out.records.len(), 1, "应产出 1 张卡");
+        let r = &out.records[0];
+        // 30/(30+170)*100 = 15, 60/(60+240)*100 = 20 → avg=17.5, peak=20
+        assert!(r.mem_avg.is_some(), "显存不应为 N/A（CompositeRatio fallback 应生效）");
+        assert!((r.mem_avg.unwrap() - 17.5).abs() < 1e-9);
+        assert!((r.mem_peak.unwrap() - 20.0).abs() < 1e-9);
     }
 }
