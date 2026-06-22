@@ -6,6 +6,9 @@
 //!
 //! Join 设计：加载阶段为每行资产注入一个隐藏列 `@key`（由 `match_keys` 指定的
 //! 资产列拼成），join 时把 `CardRecord` 同样字段拼成 key 直接比对，O(行数) 查找。
+//!
+//! 支持多来源映射：每个 `MappingSource` 可指定独立的资产表路径、匹配键和列映射，
+//! 允许从不同资产表分别取值注入报表。
 
 use crate::error::AppError;
 use crate::processor::CardRecord;
@@ -91,12 +94,29 @@ pub struct MappingColumn {
 }
 
 /// 匹配键：从 `CardRecord` / 资产行取哪些字段拼 join key。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKey {
     HostIp,
     CardId,
     NodeName,
+    SourceName,
+    DeviceType,
+    Namespace,
+    Pod,
+    Container,
+}
+
+/// 单个映射来源：独立的资产表路径 + 匹配键 + 列映射。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MappingSource {
+    /// 资产表路径（按扩展名分流 CSV/Excel）。
+    pub source_path: String,
+    /// 该来源使用的匹配键。
+    pub match_keys: Vec<MatchKey>,
+    /// 从该资产表提取的列映射。
+    pub columns: Vec<MappingColumn>,
 }
 
 /// 资产映射总配置。
@@ -104,21 +124,36 @@ pub enum MatchKey {
 #[serde(deny_unknown_fields)]
 pub struct MappingConfig {
     pub enabled: bool,
-    /// 资产表路径（按扩展名分流 CSV/Excel）。
-    pub source_path: String,
-    pub match_keys: Vec<MatchKey>,
-    pub columns: Vec<MappingColumn>,
+    /// 多来源映射列表，每个来源可指定独立的资产表、匹配键和列映射。
+    pub sources: Vec<MappingSource>,
+}
+
+impl MappingConfig {
+    /// 收集所有来源的映射列（保持来源顺序，来源内部按配置顺序）。
+    pub fn all_columns(&self) -> Vec<&MappingColumn> {
+        self.sources.iter().flat_map(|s| &s.columns).collect()
+    }
+
+    /// 收集所有来源的映射列（owned clone），用于需要所有权的场景。
+    pub fn all_columns_owned(&self) -> Vec<MappingColumn> {
+        self.sources.iter().flat_map(|s| s.columns.clone()).collect()
+    }
 }
 
 /// 资产表行：列名 → 值（含加载阶段注入的 `@key`）。
 type AssetRow = HashMap<String, String>;
 
-/// 资产表里 `match_key` 对应的列名（约定与 `CardRecord` 字段同名）。
+/// 资产表里 `match_key` 对应的列名。
 const fn asset_key_label(k: &MatchKey) -> &'static str {
     match k {
         MatchKey::HostIp => "host_ip",
         MatchKey::CardId => "card_id",
         MatchKey::NodeName => "node_name",
+        MatchKey::SourceName => "source_name",
+        MatchKey::DeviceType => "device_type",
+        MatchKey::Namespace => "namespace",
+        MatchKey::Pod => "pod",
+        MatchKey::Container => "container",
     }
 }
 
@@ -139,6 +174,11 @@ fn join_key(rec: &CardRecord, keys: &[MatchKey]) -> String {
             MatchKey::HostIp => rec.host_ip.clone(),
             MatchKey::CardId => rec.card_id.clone(),
             MatchKey::NodeName => rec.node_name.clone(),
+            MatchKey::SourceName => rec.source_name.clone(),
+            MatchKey::DeviceType => rec.device_type.clone(),
+            MatchKey::Namespace => rec.namespace.clone(),
+            MatchKey::Pod => rec.pod.clone(),
+            MatchKey::Container => rec.container.clone(),
         })
         .collect::<Vec<_>>()
         .join("|")
@@ -311,18 +351,18 @@ pub fn build_asset_index(assets: &[AssetRow]) -> AssetIndex {
     idx
 }
 
-/// 对一行 `CardRecord` 做 join，返回 (rename → value)。
+/// 对一行 `CardRecord` 做单来源 join，返回 (rename → value)。
 /// 未命中返回空 map（调用方记 Warning）。
 #[must_use]
 pub fn join_record(
     rec: &CardRecord,
     index: &AssetIndex,
-    cfg: &MappingConfig,
+    source: &MappingSource,
 ) -> HashMap<String, String> {
-    let key = join_key(rec, &cfg.match_keys);
+    let key = join_key(rec, &source.match_keys);
     let mut out = HashMap::new();
     if let Some(row) = index.get(&key) {
-        for col in &cfg.columns {
+        for col in &source.columns {
             if let Some(v) = row.get(&col.source_field) {
                 out.insert(col.rename.clone(), v.clone());
             }
@@ -414,8 +454,7 @@ mod tests {
 
     #[test]
     fn join_record_hits_and_misses() {
-        let cfg = MappingConfig {
-            enabled: true,
+        let source = MappingSource {
             source_path: String::new(),
             match_keys: vec![MatchKey::HostIp, MatchKey::CardId],
             columns: vec![MappingColumn {
@@ -428,15 +467,82 @@ mod tests {
         a1.insert("host_ip".into(), "1.1.1.1".into());
         a1.insert("card_id".into(), "0".into());
         a1.insert("机房".into(), "北京A".into());
-        inject_key(&mut a1, &cfg.match_keys);
+        inject_key(&mut a1, &source.match_keys);
         let assets = vec![a1];
         let index = build_asset_index(&assets);
 
-        let hit = join_record(&rec("1.1.1.1", "0"), &index, &cfg);
+        let hit = join_record(&rec("1.1.1.1", "0"), &index, &source);
         assert_eq!(hit.get("机房").unwrap(), "北京A");
 
-        let miss = join_record(&rec("2.2.2.2", "0"), &index, &cfg);
+        let miss = join_record(&rec("2.2.2.2", "0"), &index, &source);
         assert!(miss.is_empty());
+    }
+
+    #[test]
+    fn join_record_with_source_name_key() {
+        let source = MappingSource {
+            source_path: String::new(),
+            match_keys: vec![MatchKey::SourceName, MatchKey::HostIp],
+            columns: vec![MappingColumn {
+                source_field: "集群".into(),
+                rename: "集群".into(),
+                position: InsertPosition::after("数据来源"),
+            }],
+        };
+        let mut a1 = HashMap::new();
+        a1.insert("source_name".into(), "s".into());
+        a1.insert("host_ip".into(), "1.1.1.1".into());
+        a1.insert("集群".into(), "生产集群".into());
+        inject_key(&mut a1, &source.match_keys);
+        let assets = vec![a1];
+        let index = build_asset_index(&assets);
+
+        let hit = join_record(&rec("1.1.1.1", "0"), &index, &source);
+        assert_eq!(hit.get("集群").unwrap(), "生产集群");
+    }
+
+    #[test]
+    fn multi_source_mapping() {
+        // 两个来源：机房表用 host_ip+card_id 匹配，负责人表只用 host_ip 匹配
+        let src_room = MappingSource {
+            source_path: String::new(),
+            match_keys: vec![MatchKey::HostIp, MatchKey::CardId],
+            columns: vec![MappingColumn {
+                source_field: "机房".into(),
+                rename: "机房".into(),
+                position: InsertPosition::after("主机IP"),
+            }],
+        };
+        let src_owner = MappingSource {
+            source_path: String::new(),
+            match_keys: vec![MatchKey::HostIp],
+            columns: vec![MappingColumn {
+                source_field: "负责人".into(),
+                rename: "负责人".into(),
+                position: InsertPosition::after("机房"),
+            }],
+        };
+
+        // 机房表
+        let mut a1 = HashMap::new();
+        a1.insert("host_ip".into(), "1.1.1.1".into());
+        a1.insert("card_id".into(), "0".into());
+        a1.insert("机房".into(), "北京A".into());
+        inject_key(&mut a1, &src_room.match_keys);
+        let room_index = build_asset_index(&[a1]);
+
+        // 负责人表
+        let mut a2 = HashMap::new();
+        a2.insert("host_ip".into(), "1.1.1.1".into());
+        a2.insert("负责人".into(), "张三".into());
+        inject_key(&mut a2, &src_owner.match_keys);
+        let owner_index = build_asset_index(&[a2]);
+
+        let r = rec("1.1.1.1", "0");
+        let room_vals = join_record(&r, &room_index, &src_room);
+        let owner_vals = join_record(&r, &owner_index, &src_owner);
+        assert_eq!(room_vals.get("机房").unwrap(), "北京A");
+        assert_eq!(owner_vals.get("负责人").unwrap(), "张三");
     }
 
     #[test]

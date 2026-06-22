@@ -188,14 +188,17 @@ ownership:
   mode: "last_in_range"
 
 # 资产映射（enabled: false 关闭）
+# 支持多来源：每个来源可指定独立的资产表、匹配键和列映射
+# match_keys 可选值：host_ip, card_id, node_name, source_name, device_type, namespace, pod, container
 mapping:
   enabled: false
-  source_path: "./assets.csv"
-  match_keys: ["host_ip", "card_id"]
-  columns:
-    - source_field: "机房位置"
-      rename: "机房"
-      position: { direction: after, anchor: "主机IP" }
+  sources:
+    - source_path: "./assets.csv"
+      match_keys: ["host_ip", "card_id"]
+      columns:
+        - source_field: "机房位置"
+          rename: "机房"
+          position: { direction: after, anchor: "主机IP" }
 
 # 阈值染色触发器（默认全为 null=未配置；启用时改为如下示例）
 #   core_avg_above:

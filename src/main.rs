@@ -191,41 +191,43 @@ async fn main() -> ExitCode {
             .then(a.card_id.cmp(&b.card_id))
     });
 
-    // 7. 资产映射（可选）
+    // 7. 资产映射（可选，支持多来源）
     info!("开始资产映射");
     let mut mapping_values: HashMap<(usize, String), String> = HashMap::new();
     #[allow(clippy::option_if_let_else)]
     let mapping_columns: Vec<mapper::MappingColumn> = if let Some(m) = &cfg.mapping {
         if m.enabled {
-            info!("加载资产表：{}", m.source_path);
-            match mapper::load_asset_table(&m.source_path, &m.match_keys) {
-                Ok(assets) => {
-                    info!("资产表加载完成：{} 行", assets.len());
-                    let index = mapper::build_asset_index(&assets);
-                    let mut joined_count = 0usize;
-                    for (i, rec) in records.iter().enumerate() {
-                        let joined = mapper::join_record(rec, &index, m);
-                        if !joined.is_empty() {
-                            joined_count += 1;
+            let all_cols = m.all_columns_owned();
+            for src in &m.sources {
+                info!("加载资产表：{}", src.source_path);
+                match mapper::load_asset_table(&src.source_path, &src.match_keys) {
+                    Ok(assets) => {
+                        info!("资产表加载完成：{} 行", assets.len());
+                        let index = mapper::build_asset_index(&assets);
+                        let mut joined_count = 0usize;
+                        for (i, rec) in records.iter().enumerate() {
+                            let joined = mapper::join_record(rec, &index, src);
+                            if !joined.is_empty() {
+                                joined_count += 1;
+                            }
+                            for (rename, val) in joined {
+                                mapping_values.insert((i, rename), val);
+                            }
                         }
-                        for (rename, val) in joined {
-                            mapping_values.insert((i, rename), val);
-                        }
+                        info!("资产映射完成（{}）：{joined_count}/{} 行命中", src.source_path, records.len());
                     }
-                    info!("资产映射完成：{joined_count}/{} 行命中", records.len());
-                    // PRD §2.3：缺失锚点（非基础列）应记 Warning。
-                    warnings.extend(mapper::missing_anchor_warnings(
-                        mapper::BASE_COLUMNS,
-                        &m.columns,
-                    ));
-                    m.columns.clone()
-                }
-                Err(e) => {
-                    warn!("{e}");
-                    warnings.push(format!("{e}"));
-                    vec![]
+                    Err(e) => {
+                        warn!("{e}");
+                        warnings.push(format!("{e}"));
+                    }
                 }
             }
+            // PRD §2.3：缺失锚点（非基础列）应记 Warning。
+            warnings.extend(mapper::missing_anchor_warnings(
+                mapper::BASE_COLUMNS,
+                &all_cols,
+            ));
+            all_cols
         } else {
             info!("资产映射已关闭");
             vec![]
