@@ -159,6 +159,18 @@ impl MappingConfig {
 /// 资产表行：列名 → 值（含加载阶段注入的 `@key`）。
 type AssetRow = HashMap<String, String>;
 
+/// CardRecord 已知字段名列表，用于校验 `record_key` / `match_keys` 配置。
+pub const KNOWN_CARD_RECORD_FIELDS: &[&str] = &[
+    "source_name",
+    "host_ip",
+    "node_name",
+    "card_id",
+    "device_type",
+    "namespace",
+    "pod",
+    "container",
+];
+
 /// CardRecord 已知字段名 → 字段值映射。
 ///
 /// 支持的字段名：`source_name`、`host_ip`、`node_name`、`card_id`、
@@ -270,6 +282,26 @@ pub fn load_asset_table(path: &str, match_keys: &str, sheet: Option<&str>) -> Re
     }
 }
 
+/// 检查 `match_keys` 列是否存在于表头中，不存在时返回错误。
+fn validate_match_key_in_headers(headers: &[String], match_keys: &str, path: &str) -> Result<(), AppError> {
+    if match_keys.is_empty() {
+        return Err(AppError::Mapping {
+            path: path.into(),
+            detail: "match_keys 不能为空字符串".into(),
+        });
+    }
+    if !headers.iter().any(|h| h == match_keys) {
+        return Err(AppError::Mapping {
+            path: path.into(),
+            detail: format!(
+                "match_keys「{match_keys}」在资产表表头中不存在（可用列：{}）",
+                headers.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn load_csv(path: &str, match_keys: &str) -> Result<Vec<AssetRow>, AppError> {
     let content = std::fs::read_to_string(path).map_err(|e| AppError::Mapping {
         path: path.into(),
@@ -287,6 +319,7 @@ fn load_csv(path: &str, match_keys: &str) -> Result<Vec<AssetRow>, AppError> {
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
+    validate_match_key_in_headers(&headers, match_keys, path)?;
     let mut rows = Vec::new();
     for rec in rdr.records() {
         let rec = rec.map_err(|e| AppError::Mapping {
@@ -312,6 +345,17 @@ fn load_excel(path: &str, match_keys: &str, sheet: Option<&str>) -> Result<Vec<A
         detail: format!("打开 Excel 失败：{e}"),
     })?;
     let name = if let Some(s) = sheet {
+        // 校验指定的工作表名是否存在于 workbook 中
+        let sheet_names = book.sheet_names();
+        if !sheet_names.iter().any(|sn| sn == s) {
+            return Err(AppError::Mapping {
+                path: path.into(),
+                detail: format!(
+                    "工作表「{s}」不存在（可用工作表：{}）",
+                    sheet_names.join(", ")
+                ),
+            });
+        }
         s.to_string()
     } else {
         book.sheet_names()
@@ -332,6 +376,7 @@ fn load_excel(path: &str, match_keys: &str, sheet: Option<&str>) -> Result<Vec<A
         detail: "Excel 首行（表头）为空".into(),
     })?;
     let headers: Vec<String> = header.iter().map(ToString::to_string).collect();
+    validate_match_key_in_headers(&headers, match_keys, path)?;
     let mut rows = Vec::new();
     for row in iter {
         let mut m = HashMap::new();
@@ -667,5 +712,31 @@ mod tests {
         assert_eq!(card_record_field(&r, "hostname"), "");
         assert_eq!(card_record_field(&r, "ip"), "");
         assert_eq!(card_record_field(&r, ""), "");
+    }
+
+    #[test]
+    fn validate_match_key_rejects_missing_column() {
+        let headers = vec!["host_ip".into(), "机房".into()];
+        let result = validate_match_key_in_headers(&headers, "nonexistent", "test.csv");
+        assert!(result.is_err(), "不存在的列名应被拒绝");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("nonexistent"), "错误信息应包含列名");
+        assert!(msg.contains("host_ip"), "错误信息应列出可用列");
+    }
+
+    #[test]
+    fn validate_match_key_rejects_empty() {
+        let headers = vec!["host_ip".into()];
+        let result = validate_match_key_in_headers(&headers, "", "test.csv");
+        assert!(result.is_err(), "空 match_keys 应被拒绝");
+    }
+
+    #[test]
+    fn validate_match_key_accepts_existing_column() {
+        let headers = vec!["host_ip".into(), "机房".into()];
+        assert!(
+            validate_match_key_in_headers(&headers, "host_ip", "test.csv").is_ok(),
+            "存在的列名应通过校验"
+        );
     }
 }

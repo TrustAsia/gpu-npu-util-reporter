@@ -424,6 +424,32 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             }
         }
     }
+    // 校验映射配置中的 record_key / match_keys 字段名合法性
+    if let Some(mapping) = &cfg.mapping {
+        for src in &mapping.sources {
+            if src.match_keys.is_empty() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "映射来源「{}」的 match_keys 不能为空字符串",
+                        src.source_path
+                    ),
+                });
+            }
+            let card_record_field = src.record_key.as_deref().unwrap_or(&src.match_keys);
+            if !crate::mapper::KNOWN_CARD_RECORD_FIELDS.contains(&card_record_field) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "映射来源「{}」的 CardRecord 字段名「{}」不在已知字段列表中（支持：{}）",
+                        src.source_path,
+                        card_record_field,
+                        crate::mapper::KNOWN_CARD_RECORD_FIELDS.join(", ")
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -751,5 +777,60 @@ mod tests {
         assert!(!is_valid_label_name("1digit"));
         assert!(!is_valid_label_name("label:colon")); // 冒号不允许在标签名中
         assert!(!is_valid_label_name("label\"quote"));
+    }
+
+    #[test]
+    fn config_rejects_mapping_with_unknown_record_key() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                source_sheet: None,
+                match_keys: "IP地址".into(),
+                record_key: Some("unknown_field".into()),
+                columns: vec![],
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "未知 record_key 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("unknown_field"), "错误信息应包含字段名");
+    }
+
+    #[test]
+    fn config_rejects_mapping_with_empty_match_keys() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                source_sheet: None,
+                match_keys: String::new(),
+                record_key: None,
+                columns: vec![],
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 match_keys 应被拒绝");
+    }
+
+    #[test]
+    fn config_accepts_mapping_with_known_record_key() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                source_sheet: None,
+                match_keys: "IP地址".into(),
+                record_key: Some("host_ip".into()),
+                columns: vec![],
+            }],
+        });
+        assert!(
+            validate_config(&cfg, "test.yaml").is_ok(),
+            "已知 record_key 应通过校验"
+        );
     }
 }

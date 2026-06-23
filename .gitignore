@@ -8,6 +8,9 @@
 .Spotlight-V100
 .Trashes
 
+# Synology NAS
+@eaDir/
+
 # Windows
 Thumbs.db
 ehthumbs.db
