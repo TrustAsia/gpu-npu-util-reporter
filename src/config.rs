@@ -189,12 +189,15 @@ ownership:
 
 # 资产映射（enabled: false 关闭）
 # 支持多来源：每个来源可指定独立的资产表、匹配键和列映射
-# match_keys 可选值：host_ip, card_id, node_name, source_name, device_type, namespace, pod, container
+# match_keys 为资产表中的列名，CardRecord 侧自动映射已知字段：
+#   source_name, host_ip, node_name, card_id, device_type, namespace, pod, container
+# record_key 可选，当资产表列名与 CardRecord 字段名不同时指定（如资产表用 "IP地址"，record_key: "host_ip"）
+# source_sheet 可选，指定 Excel 工作表名；不指定时取第一个工作表
 mapping:
   enabled: false
   sources:
     - source_path: "./assets.csv"
-      match_keys: ["host_ip", "card_id"]
+      match_keys: "host_ip"
       columns:
         - source_field: "机房位置"
           rename: "机房"

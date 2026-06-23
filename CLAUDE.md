@@ -11,3 +11,7 @@
 CI Release 行为：
 - 版本号 tag 不存在时 → 创建 `v{version}` Release（正式版）
 - 版本号 tag 已存在时 → 创建 `v{version}+{short_sha}` Release（自动标记为 prerelease）
+
+## 推送规则
+
+每次代码修改完成后**必须**同步推送到 GitHub（`git add` → `git commit` → `git push`），确保远程仓库与本地一致。

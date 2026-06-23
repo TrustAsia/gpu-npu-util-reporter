@@ -200,7 +200,11 @@ async fn main() -> ExitCode {
             let all_cols = m.all_columns_owned();
             for src in &m.sources {
                 info!("加载资产表：{}", src.source_path);
-                match mapper::load_asset_table(&src.source_path, &src.match_keys) {
+                match mapper::load_asset_table(
+                    &src.source_path,
+                    &src.match_keys,
+                    src.source_sheet.as_deref(),
+                ) {
                     Ok(assets) => {
                         info!("资产表加载完成：{} 行", assets.len());
                         let index = mapper::build_asset_index(&assets);
