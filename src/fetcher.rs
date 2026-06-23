@@ -114,8 +114,13 @@ impl MetricFetcher for PrometheusFetcher {
         // 分段：每段最多 PROM_MAX_POINTS-1 个 step-interval（含两端点共 PROM_MAX_POINTS 个点）。
         // Prometheus query_range 包含 start 和 end 时刻，11000 个 interval = 11001 个点，
         // 超出 --query.max-samples 默认值 11000，因此每段最多 10999 个 interval。
-        let segment_secs = step_secs * (PROM_MAX_POINTS - 1);
-        let num_segments = (range_secs + segment_secs - 1) / segment_secs; // ceil
+        let segment_secs = step_secs.checked_mul(PROM_MAX_POINTS - 1).unwrap_or(i64::MAX);
+        let num_segments = segment_secs
+            .checked_add(range_secs)
+            .and_then(|v| v.checked_sub(1))
+            .map(|v| v / segment_secs)
+            .unwrap_or(i64::MAX)
+            .max(1);
 
         let mut all_series: Vec<Series> = Vec::new();
         let mut seg_start = start;

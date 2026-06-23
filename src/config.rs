@@ -425,8 +425,10 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
         }
     }
     // 校验映射配置中的 record_key / match_keys 字段名合法性
+    // 仅在 mapping.enabled=true 时校验；disabled 的映射不应阻断配置加载
     if let Some(mapping) = &cfg.mapping {
-        for src in &mapping.sources {
+        if mapping.enabled {
+            for src in &mapping.sources {
             if src.match_keys.is_empty() {
                 return Err(AppError::Config {
                     path: path.into(),
@@ -448,6 +450,15 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     ),
                 });
             }
+        }
+        // 检测映射列 rename 重复
+        let dup_warnings = mapping.duplicate_rename_warnings();
+        if let Some(first) = dup_warnings.first() {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: first.clone(),
+            });
+        }
         }
     }
     Ok(())

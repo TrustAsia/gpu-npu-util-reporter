@@ -5,7 +5,7 @@
 //! （锚点列 + before/after 方向）。开关关闭时整个模块跳过。
 //!
 //! Join 设计：加载阶段为每行资产注入一个隐藏列 `@key`（由 `match_keys` 指定的
-//! 资产列拼成），join 时把 `CardRecord` 同样字段拼成 key 直接比对，O(行数) 查找。
+//! 资产列值），join 时把 `CardRecord` 同样字段拼成 key 直接比对，O(行数) 查找。
 //!
 //! 支持多来源映射：每个 `MappingSource` 可指定独立的资产表路径、匹配键和列映射，
 //! 允许从不同资产表分别取值注入报表。
@@ -153,6 +153,23 @@ impl MappingConfig {
     /// 收集所有来源的映射列（owned clone），用于需要所有权的场景。
     pub fn all_columns_owned(&self) -> Vec<MappingColumn> {
         self.sources.iter().flat_map(|s| s.columns.clone()).collect()
+    }
+
+    /// 检测所有来源中是否存在重复的 rename，返回警告列表。
+    /// 重复 rename 会导致 Excel 列名重复和数据覆盖，应在配置阶段拒绝。
+    pub fn duplicate_rename_warnings(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut dupes = Vec::new();
+        for col in self.sources.iter().flat_map(|s| &s.columns) {
+            if !seen.insert(&col.rename) {
+                dupes.push(col.rename.clone());
+            }
+        }
+        dupes.sort();
+        dupes.dedup();
+        dupes.into_iter()
+            .map(|r| format!("映射列 rename「{r}」在多个来源中重复，将导致数据覆盖"))
+            .collect()
     }
 }
 
@@ -395,16 +412,23 @@ fn load_excel(path: &str, match_keys: &str, sheet: Option<&str>) -> Result<Vec<A
 type AssetIndex = HashMap<String, AssetRow>;
 
 /// 从资产行列表构建 `@key` 索引，供 `join_record` 做 O(1) 查找。
-/// 同一 `@key` 出现多次时取首行（与原线性扫描行为一致）。
+/// 同一 `@key` 出现多次时取首行，并返回重复 key 的警告列表。
 #[must_use]
-pub fn build_asset_index(assets: &[AssetRow]) -> AssetIndex {
+pub fn build_asset_index(assets: &[AssetRow]) -> (AssetIndex, Vec<String>) {
     let mut idx = HashMap::with_capacity(assets.len());
+    let mut warnings = Vec::new();
     for row in assets {
         if let Some(key) = row.get("@key") {
-            idx.entry(key.clone()).or_insert_with(|| row.clone());
+            if idx.contains_key(key) {
+                warnings.push(format!(
+                    "资产表 @key「{key}」重复，仅保留首行（跳过后续重复行）"
+                ));
+            } else {
+                idx.insert(key.clone(), row.clone());
+            }
         }
     }
-    idx
+    (idx, warnings)
 }
 
 /// 对一行 `CardRecord` 做单来源 join，返回 (rename → value)。
@@ -526,7 +550,7 @@ mod tests {
         a1.insert("机房".into(), "北京A".into());
         inject_key(&mut a1, &source.match_keys);
         let assets = vec![a1];
-        let index = build_asset_index(&assets);
+        let (index, _) = build_asset_index(&assets);
 
         let hit = join_record(&rec("1.1.1.1", "0"), &index, &source);
         assert_eq!(hit.get("机房").unwrap(), "北京A");
@@ -554,7 +578,7 @@ mod tests {
         a1.insert("机房".into(), "北京A".into());
         inject_key(&mut a1, &source.match_keys);
         let assets = vec![a1];
-        let index = build_asset_index(&assets);
+        let (index, _) = build_asset_index(&assets);
 
         // CardRecord 的 host_ip 字段值 "1.1.1.1" 通过 record_key 映射，
         // 应能匹配到资产表的 "IP地址" 列值
@@ -581,7 +605,7 @@ mod tests {
         a1.insert("机房".into(), "北京A".into());
         inject_key(&mut a1, &source.match_keys);
         let assets = vec![a1];
-        let index = build_asset_index(&assets);
+        let (index, _) = build_asset_index(&assets);
 
         let miss = join_record(&rec("1.1.1.1", "0"), &index, &source);
         assert!(miss.is_empty(), "未知字段名应导致 join key 为空串，不会命中");
@@ -618,14 +642,14 @@ mod tests {
         a1.insert("host_ip".into(), "1.1.1.1".into());
         a1.insert("机房".into(), "北京A".into());
         inject_key(&mut a1, &src_room.match_keys);
-        let room_index = build_asset_index(&[a1]);
+        let (room_index, _) = build_asset_index(&[a1]);
 
         // 负责人表
         let mut a2 = HashMap::new();
         a2.insert("node_name".into(), "node-1".into());
         a2.insert("负责人".into(), "张三".into());
         inject_key(&mut a2, &src_owner.match_keys);
-        let owner_index = build_asset_index(&[a2]);
+        let (owner_index, _) = build_asset_index(&[a2]);
 
         let mut r = rec("1.1.1.1", "0");
         r.node_name = "node-1".into();
@@ -654,7 +678,7 @@ mod tests {
         a2.insert("主机名".into(), "node-1".into());
         a2.insert("负责人".into(), "张三".into());
         inject_key(&mut a2, &src_owner.match_keys);
-        let owner_index = build_asset_index(&[a2]);
+        let (owner_index, _) = build_asset_index(&[a2]);
 
         let mut r = rec("1.1.1.1", "0");
         r.node_name = "node-1".into();

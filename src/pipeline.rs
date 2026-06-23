@@ -293,9 +293,12 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
             fallback_composite_ratio(ctx, &b.composite_ratio).await
         }
         MemoryStrategy::DirectMetric(b) => {
-            // DirectMetric 嵌套 DirectMetric 时，递归尝试其 fallback。
-            // Box::pin 因为递归 async fn 需要间接层以避免无限大小的 future。
-            if let Some(inner_fb) = &b.direct_metric.fallback {
+            // DirectMetric 嵌套 DirectMetric 时，先查询内层 DirectMetric 的自身指标；
+            // 若仍为空，再递归尝试其 fallback。
+            let result = fetch_with_warning(ctx, &b.direct_metric.metric).await;
+            if !result.is_empty() {
+                result
+            } else if let Some(inner_fb) = &b.direct_metric.fallback {
                 Box::pin(fallback_used_total(ctx, inner_fb.as_ref())).await
             } else {
                 Vec::new()
@@ -517,18 +520,8 @@ async fn ownership_for(
     // 多条 series（每条带不同归属标签集），按点的最大时间戳排序取末态非空。
     // host_ip 过滤确保多主机集群中只查目标主机，避免跨主机归属错乱。
     // 对 card_id/host_ip 值做 PromQL 转义，防止标签值中的引号/反斜杠/换行破坏查询语法。
-    let escaped = card_id
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    let ip_escaped = host_ip
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
+    let escaped = escape_promql_label_value(card_id);
+    let ip_escaped = escape_promql_label_value(host_ip);
 
     // 优先用核心指标查归属，含 instance 标签回退
     if let Some(series) =
@@ -654,6 +647,17 @@ fn escape_promql_regex(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// 对 PromQL 标签值做转义（用于 `="..."` 精确匹配）。
+///
+/// Prometheus 标签值使用 Go 字符串字面量语法，需转义：`\\`、`\"`、`\n`、`\r`、`\t`。
+fn escape_promql_label_value(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 #[cfg(test)]

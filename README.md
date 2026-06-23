@@ -115,12 +115,15 @@ ownership:
 
 mapping:
   enabled: false
-  source_path: "./assets.csv"
-  match_keys: ["host_ip", "card_id"]
-  columns:
-    - source_field: "机房位置"
-      rename: "机房"
-      position: { direction: after, anchor: "主机IP" }   # 锚点必须为基础列
+  sources:
+    - source_path: "./assets.csv"
+      match_keys: "host_ip"          # 资产表中的匹配列名
+      # record_key: "host_ip"        # 可选，CardRecord 侧字段名（默认与 match_keys 相同）
+      # source_sheet: "Sheet1"       # 可选，Excel 工作表名
+      columns:
+        - source_field: "机房位置"
+          rename: "机房"
+          position: { direction: after, anchor: "主机IP" }   # 锚点必须为基础列
 
 # 8 个阈值触发器，默认全为 null（关闭）。启用示例：
 #   core_avg_above:

@@ -207,7 +207,11 @@ async fn main() -> ExitCode {
                 ) {
                     Ok(assets) => {
                         info!("资产表加载完成：{} 行", assets.len());
-                        let index = mapper::build_asset_index(&assets);
+                        let (index, dup_warnings) = mapper::build_asset_index(&assets);
+                        for w in &dup_warnings {
+                            warn!("{w}");
+                        }
+                        warnings.extend(dup_warnings);
                         let mut joined_count = 0usize;
                         for (i, rec) in records.iter().enumerate() {
                             let joined = mapper::join_record(rec, &index, src);

@@ -77,7 +77,9 @@ pub fn resolve_time_expr(expr: &str, ctx: &TimeContext) -> Result<DateTime<Utc>,
         return Ok(base);
     }
     let offset = parse_offset(rest)?;
-    Ok(base + offset)
+    base.checked_add_signed(offset).ok_or_else(|| AppError::TimeFormat {
+        raw: format!("时间计算溢出：「{trimmed}」偏移量超出可表示范围"),
+    })
 }
 
 /// 解析锚点关键字，返回 (`anchor_name`, 剩余部分)。
