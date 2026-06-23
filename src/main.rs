@@ -194,7 +194,6 @@ async fn main() -> ExitCode {
     // 7. 资产映射（可选，支持多来源）
     info!("开始资产映射");
     let mut mapping_values: HashMap<(usize, String), String> = HashMap::new();
-    #[allow(clippy::option_if_let_else)]
     let mapping_columns: Vec<mapper::MappingColumn> = if let Some(m) = &cfg.mapping {
         if m.enabled {
             let all_cols = m.all_columns_owned();
@@ -271,7 +270,7 @@ async fn main() -> ExitCode {
                 error!("报表写入失败：{e}");
                 return ExitCode::from(1);
             }
-            info!("报表已生成：{output_path}（{} 条记录，{} 字节）", records.len(), std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0));
+            info!("报表已生成：{output_path}（{} 条记录，{} 字节）", records.len(), std::fs::metadata(&output_path).map_or(0, |m| m.len()));
         }
         Err(e) => {
             error!("{e}");

@@ -87,7 +87,7 @@ enum PromResult {
     },
 }
 
-/// Prometheus 默认单次 query_range 最大数据点数（`--query.max-samples` 默认值）。
+/// Prometheus 默认单次 `query_range` 最大数据点数（`--query.max-samples` 默认值）。
 /// 超出此限制会返回 `bad_data: exceeded maximum resolution`。
 const PROM_MAX_POINTS: i64 = 11_000;
 
@@ -118,8 +118,7 @@ impl MetricFetcher for PrometheusFetcher {
         let num_segments = segment_secs
             .checked_add(range_secs)
             .and_then(|v| v.checked_sub(1))
-            .map(|v| v / segment_secs)
-            .unwrap_or(i64::MAX)
+            .map_or(i64::MAX, |v| v / segment_secs)
             .max(1);
 
         let mut all_series: Vec<Series> = Vec::new();
@@ -189,7 +188,7 @@ impl MetricFetcher for PrometheusFetcher {
 }
 
 impl PrometheusFetcher {
-    /// 单次 query_range HTTP 请求（不分段）。
+    /// 单次 `query_range` HTTP 请求（不分段）。
     async fn query_range_single(
         &self,
         promql: &str,

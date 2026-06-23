@@ -14,7 +14,7 @@
 //! [`card_record_field`] 函数将已知的字段名映射到对应字段值，支持：
 //! `source_name`、`host_ip`、`node_name`、`card_id`、`device_type`、
 //! `namespace`、`pod`、`container`。不在上述列表中的 `match_keys` 在资产表
-//! 侧仍可正常拼 key，但 CardRecord 侧取值为空串（join 不会命中）。
+//! 侧仍可正常拼 key，但 `CardRecord` 侧取值为空串（join 不会命中）。
 
 use crate::error::AppError;
 use crate::processor::CardRecord;
@@ -105,7 +105,7 @@ pub struct MappingColumn {
 /// `record_key`（可选）指定对应字段名；不指定时默认与 `match_keys` 相同。
 /// [`card_record_field`] 支持的字段名：`source_name`、`host_ip`、`node_name`、
 /// `card_id`、`device_type`、`namespace`、`pod`、`container`。
-/// 不在已知列表中的字段名在 CardRecord 侧取值为空串。
+/// 不在已知列表中的字段名在 `CardRecord` 侧取值为空串。
 ///
 /// 可选 `source_sheet` 指定 Excel 工作表名；不指定时取第一个工作表。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,17 +118,17 @@ pub struct MappingSource {
     pub source_sheet: Option<String>,
     /// 资产表中的匹配列名。
     ///
-    /// CardRecord 侧通过 `record_key` 映射对应字段；不指定 `record_key` 时
+    /// `CardRecord` 侧通过 `record_key` 映射对应字段；不指定 `record_key` 时
     /// 默认与 `match_keys` 相同。
     pub match_keys: String,
-    /// CardRecord 侧对应的字段名（可选）。
+    /// `CardRecord` 侧对应的字段名（可选）。
     ///
     /// 支持的字段名：`source_name`、`host_ip`、`node_name`、`card_id`、
     /// `device_type`、`namespace`、`pod`、`container`。
-    /// 不指定时默认与 `match_keys` 相同，适用于资产表列名与 CardRecord
+    /// 不指定时默认与 `match_keys` 相同，适用于资产表列名与 `CardRecord`
     /// 字段名一致的场景（如 `host_ip`）。
-    /// 当资产表列名不同于 CardRecord 字段名时（如资产表用 `IP地址`，
-    /// CardRecord 用 `host_ip`），需要显式指定 `record_key`。
+    /// 当资产表列名不同于 `CardRecord` 字段名时（如资产表用 `IP地址`，
+    /// `CardRecord` 用 `host_ip`），需要显式指定 `record_key`。
     #[serde(default)]
     pub record_key: Option<String>,
     /// 从该资产表提取的列映射。
@@ -145,18 +145,15 @@ pub struct MappingConfig {
 }
 
 impl MappingConfig {
-    /// 收集所有来源的映射列（保持来源顺序，来源内部按配置顺序）。
-    pub fn all_columns(&self) -> Vec<&MappingColumn> {
-        self.sources.iter().flat_map(|s| &s.columns).collect()
-    }
-
     /// 收集所有来源的映射列（owned clone），用于需要所有权的场景。
+    #[must_use]
     pub fn all_columns_owned(&self) -> Vec<MappingColumn> {
         self.sources.iter().flat_map(|s| s.columns.clone()).collect()
     }
 
     /// 检测所有来源中是否存在重复的 rename，返回警告列表。
     /// 重复 rename 会导致 Excel 列名重复和数据覆盖，应在配置阶段拒绝。
+    #[must_use]
     pub fn duplicate_rename_warnings(&self) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut dupes = Vec::new();
@@ -176,7 +173,7 @@ impl MappingConfig {
 /// 资产表行：列名 → 值（含加载阶段注入的 `@key`）。
 type AssetRow = HashMap<String, String>;
 
-/// CardRecord 已知字段名列表，用于校验 `record_key` / `match_keys` 配置。
+/// `CardRecord` 已知字段名列表，用于校验 `record_key` / `match_keys` 配置。
 pub const KNOWN_CARD_RECORD_FIELDS: &[&str] = &[
     "source_name",
     "host_ip",
@@ -188,7 +185,7 @@ pub const KNOWN_CARD_RECORD_FIELDS: &[&str] = &[
     "container",
 ];
 
-/// CardRecord 已知字段名 → 字段值映射。
+/// `CardRecord` 已知字段名 → 字段值映射。
 ///
 /// 支持的字段名：`source_name`、`host_ip`、`node_name`、`card_id`、
 /// `device_type`、`namespace`、`pod`、`container`。
@@ -215,7 +212,7 @@ fn inject_key(row: &mut AssetRow, match_keys: &str) {
 }
 
 /// 由一张卡的字段构造 join key 字符串。
-/// 使用 `record_key`（有值时）或 `match_keys`（默认）作为 CardRecord 字段名。
+/// 使用 `record_key`（有值时）或 `match_keys`（默认）作为 `CardRecord` 字段名。
 fn join_key(rec: &CardRecord, source: &MappingSource) -> String {
     let field = source.record_key.as_deref().unwrap_or(&source.match_keys);
     card_record_field(rec, field)
@@ -762,5 +759,75 @@ mod tests {
             validate_match_key_in_headers(&headers, "host_ip", "test.csv").is_ok(),
             "存在的列名应通过校验"
         );
+    }
+
+    #[test]
+    fn build_asset_index_duplicate_key_warnings() {
+        let mut a1 = HashMap::new();
+        a1.insert("host_ip".into(), "1.1.1.1".into());
+        a1.insert("机房".into(), "北京A".into());
+        inject_key(&mut a1, "host_ip");
+        let mut a2 = HashMap::new();
+        a2.insert("host_ip".into(), "1.1.1.1".into()); // 重复 key
+        a2.insert("机房".into(), "北京B".into());
+        inject_key(&mut a2, "host_ip");
+        let (index, warnings) = build_asset_index(&[a1, a2]);
+        assert_eq!(index.len(), 1, "重复 key 应只保留首行");
+        assert_eq!(warnings.len(), 1, "应有 1 条重复警告");
+        assert!(warnings[0].contains("1.1.1.1"), "警告应包含重复 key");
+        assert_eq!(index.get("1.1.1.1").unwrap().get("机房").unwrap(), "北京A", "应保留首行");
+    }
+
+    #[test]
+    fn duplicate_rename_warnings_detects_cross_source_dupes() {
+        let cfg = MappingConfig {
+            enabled: true,
+            sources: vec![
+                MappingSource {
+                    source_path: "a.csv".into(),
+                    source_sheet: None,
+                    match_keys: "host_ip".into(),
+                    record_key: None,
+                    columns: vec![MappingColumn {
+                        source_field: "room".into(),
+                        rename: "机房".into(),
+                        position: InsertPosition::after("主机IP"),
+                    }],
+                },
+                MappingSource {
+                    source_path: "b.csv".into(),
+                    source_sheet: None,
+                    match_keys: "host_ip".into(),
+                    record_key: None,
+                    columns: vec![MappingColumn {
+                        source_field: "location".into(),
+                        rename: "机房".into(), // 与第一个来源重复
+                        position: InsertPosition::after("主机IP"),
+                    }],
+                },
+            ],
+        };
+        let warnings = cfg.duplicate_rename_warnings();
+        assert_eq!(warnings.len(), 1, "跨来源的重复 rename 应被检测");
+        assert!(warnings[0].contains("机房"), "警告应包含重复的 rename");
+    }
+
+    #[test]
+    fn duplicate_rename_warnings_empty_for_unique_renames() {
+        let cfg = MappingConfig {
+            enabled: true,
+            sources: vec![MappingSource {
+                source_path: "a.csv".into(),
+                source_sheet: None,
+                match_keys: "host_ip".into(),
+                record_key: None,
+                columns: vec![MappingColumn {
+                    source_field: "room".into(),
+                    rename: "机房".into(),
+                    position: InsertPosition::after("主机IP"),
+                }],
+            }],
+        };
+        assert!(cfg.duplicate_rename_warnings().is_empty(), "无重复 rename 不应产出警告");
     }
 }

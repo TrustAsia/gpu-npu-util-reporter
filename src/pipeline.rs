@@ -649,7 +649,7 @@ fn escape_promql_regex(s: &str) -> String {
     out
 }
 
-/// 对 PromQL 标签值做转义（用于 `="..."` 精确匹配）。
+/// 对 `PromQL` 标签值做转义（用于 `="..."` 精确匹配）。
 ///
 /// Prometheus 标签值使用 Go 字符串字面量语法，需转义：`\\`、`\"`、`\n`、`\r`、`\t`。
 fn escape_promql_label_value(s: &str) -> String {
@@ -1437,6 +1437,27 @@ mod tests {
             out.warnings.iter().any(|w| w.contains("used") && w.contains("total")),
             "有 used 无 total 时应发 Warning，实际：{:?}",
             out.warnings
+        );
+    }
+
+    // ---- escape_promql_label_value 转义正确性 ----
+
+    #[test]
+    fn escape_promql_label_value_escapes_special_chars() {
+        assert_eq!(escape_promql_label_value(r#"hello"#), r#"hello"#);
+        assert_eq!(escape_promql_label_value(r#"back\slash"#), r#"back\\slash"#);
+        assert_eq!(escape_promql_label_value(r#""quoted""#), r#"\"quoted\""#);
+        assert_eq!(escape_promql_label_value("new\nline"), r#"new\nline"#);
+        assert_eq!(escape_promql_label_value("carriage\rreturn"), r#"carriage\rreturn"#);
+        assert_eq!(escape_promql_label_value("tab\there"), r#"tab\there"#);
+    }
+
+    #[test]
+    fn escape_promql_label_value_combined() {
+        // 同时含反斜杠、引号和换行
+        assert_eq!(
+            escape_promql_label_value("path\\file\nend"),
+            r#"path\\file\nend"#
         );
     }
 }
