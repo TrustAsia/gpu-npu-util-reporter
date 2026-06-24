@@ -1,6 +1,6 @@
 [package]
 name = "gpu-npu-util-reporter"
-version = "1.5.0"
+version = "1.5.1"
 edition = "2021"
 description = "从多个 Prometheus 数据源提取 GPU/NPU 计算卡利用率与显存占用，聚合后生成带阈值染色的 Excel 报表。"
 license = "MIT"
