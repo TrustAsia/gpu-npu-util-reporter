@@ -58,6 +58,9 @@ fn renders_report_with_highlight_and_reads_back() {
         host_mem_avg: None,
         host_mem_peak: None,
         host_mem_peak_time: None,
+        host_handle_avg: None,
+        host_handle_peak: None,
+        host_handle_peak_time: None,
         range_start: Utc.timestamp_opt(0, 0).unwrap(),
         range_end: Utc.timestamp_opt(2000, 0).unwrap(),
     };
@@ -125,6 +128,9 @@ fn renders_report_with_mapping_columns() {
         host_mem_avg: None,
         host_mem_peak: None,
         host_mem_peak_time: None,
+        host_handle_avg: None,
+        host_handle_peak: None,
+        host_handle_peak_time: None,
         range_start: Utc.timestamp_opt(0, 0).unwrap(),
         range_end: Utc.timestamp_opt(2000, 0).unwrap(),
     };

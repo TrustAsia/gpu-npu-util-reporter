@@ -87,6 +87,12 @@ pub struct CardRecord {
     pub host_mem_peak: Option<f64>,
     /// 主机内存峰值出现时间。
     pub host_mem_peak_time: Option<DateTime<Utc>>,
+    /// 主机句柄数平均值。None = N/A。
+    pub host_handle_avg: Option<f64>,
+    /// 主机句柄数峰值。
+    pub host_handle_peak: Option<f64>,
+    /// 主机句柄数峰值出现时间。
+    pub host_handle_peak_time: Option<DateTime<Utc>>,
     /// 取值时间范围起点。
     pub range_start: DateTime<Utc>,
     /// 取值时间范围终点。

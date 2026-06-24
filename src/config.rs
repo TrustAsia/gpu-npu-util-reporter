@@ -113,7 +113,7 @@ fn default_log_path() -> String {
 
 /// 主机指标采集配置（通用指标，不绑定设备类型）。
 ///
-/// 启用后对每个唯一的主机 IP 查询 CPU/内存利用率，
+/// 启用后对每个唯一的主机 IP 查询 CPU/内存/句柄数利用率，
 /// 结果填入该主机下所有计算卡行。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +128,9 @@ pub struct HostMetricsConfig {
     pub cpu_metric: String,
     /// 内存利用率 Prometheus 指标名。
     pub mem_metric: String,
+    /// 句柄数 Prometheus 指标名（可选）。
+    #[serde(default)]
+    pub handle_metric: Option<String>,
     /// Prometheus 标签名，用于匹配主机 IP（默认 "instance"）。
     #[serde(default = "default_host_label")]
     pub host_label: String,
@@ -273,13 +276,17 @@ thresholds:
   host_cpu_avg_below:  null
   host_cpu_peak_above: null
   host_cpu_peak_below: null
-  host_mem_avg_above:  null
-  host_mem_avg_below:  null
-  host_mem_peak_above: null
-  host_mem_peak_below: null
+  host_mem_avg_above:    null
+  host_mem_avg_below:    null
+  host_mem_peak_above:   null
+  host_mem_peak_below:   null
+  host_handle_avg_above:  null
+  host_handle_avg_below:  null
+  host_handle_peak_above: null
+  host_handle_peak_below: null
 
 # 主机指标采集（可选，通用指标，不绑定设备类型）
-# 启用后对每个唯一的主机 IP 查询 CPU/内存利用率，
+# 启用后对每个唯一的主机 IP 查询 CPU/内存/句柄数，
 # 结果填入该主机下所有计算卡行。
 # source 可选：指定从哪个数据源查询（按 name 匹配），不指定使用第一个数据源。
 # host_label 可选：Prometheus 标签名用于匹配主机 IP（默认 instance）。
@@ -288,6 +295,7 @@ thresholds:
 #   source: "prod-cluster"
 #   cpu_metric: "node_cpu_utilization"
 #   mem_metric: "node_memory_utilization"
+#   handle_metric: "node_filefd_allocated"
 #   host_label: "instance"
 
 # 日志配置
@@ -544,6 +552,16 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                         hm.mem_metric
                     ),
                 });
+            }
+            if let Some(handle) = &hm.handle_metric {
+                if !is_valid_metric_name(handle) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "host_metrics.handle_metric「{handle}」不是合法的 Prometheus 指标名"
+                        ),
+                    });
+                }
             }
             if !is_valid_label_name(&hm.host_label) {
                 return Err(AppError::Config {

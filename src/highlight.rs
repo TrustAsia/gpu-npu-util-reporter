@@ -21,6 +21,8 @@ pub const COL_HOST_CPU_AVG: &str = "主机CPU利用率平均值";
 pub const COL_HOST_CPU_PEAK: &str = "主机CPU利用率峰值";
 pub const COL_HOST_MEM_AVG: &str = "主机内存利用率平均值";
 pub const COL_HOST_MEM_PEAK: &str = "主机内存利用率峰值";
+pub const COL_HOST_HANDLE_AVG: &str = "主机句柄数平均值";
+pub const COL_HOST_HANDLE_PEAK: &str = "主机句柄数峰值";
 
 /// HEX 颜色包装类型，反序列化时校验合法性（`#RRGGBB` 或 `#RGB`）。
 ///
@@ -158,6 +160,15 @@ pub struct ThresholdTriggers {
     pub host_mem_peak_above: Option<TriggerConfig>,
     #[serde(default)]
     pub host_mem_peak_below: Option<TriggerConfig>,
+    // 主机句柄数
+    #[serde(default)]
+    pub host_handle_avg_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_handle_avg_below: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_handle_peak_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_handle_peak_below: Option<TriggerConfig>,
 }
 
 /// 一条命中结果：列名 + 颜色（借用，避免克隆）。
@@ -271,6 +282,22 @@ impl ThresholdTriggers {
         ) {
             hits.push(h);
         }
+        if let Some(h) = first_hit(
+            self.host_handle_avg_above.as_ref(),
+            self.host_handle_avg_below.as_ref(),
+            r.host_handle_avg,
+            COL_HOST_HANDLE_AVG,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.host_handle_peak_above.as_ref(),
+            self.host_handle_peak_below.as_ref(),
+            r.host_handle_peak,
+            COL_HOST_HANDLE_PEAK,
+        ) {
+            hits.push(h);
+        }
         hits
     }
 }
@@ -350,6 +377,9 @@ mod tests {
             host_mem_avg: None,
             host_mem_peak: None,
             host_mem_peak_time: None,
+            host_handle_avg: None,
+            host_handle_peak: None,
+            host_handle_peak_time: None,
             range_start: Utc.timestamp_opt(0, 0).unwrap(),
             range_end: Utc.timestamp_opt(60, 0).unwrap(),
         }

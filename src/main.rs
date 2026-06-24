@@ -211,6 +211,7 @@ async fn main() -> ExitCode {
         if hm.enabled {
             column_flags.has_host_cpu = true;
             column_flags.has_host_mem = true;
+            column_flags.has_host_handle = hm.handle_metric.is_some();
 
             // 确定使用哪个数据源
             let host_source = if let Some(ref name) = hm.source {
@@ -293,6 +294,33 @@ async fn main() -> ExitCode {
                         }
                     };
 
+                    // 查询句柄数（可选）
+                    let (handle_avg, handle_peak, handle_peak_t) =
+                        if let Some(handle_metric) = &hm.handle_metric {
+                            let h_promql = format!("{handle_metric}{{{}}}", label_filter);
+                            match host_fetcher.query_range(&h_promql, start, end, step).await {
+                                Ok(series) => {
+                                    let mut all_points: Vec<(chrono::DateTime<chrono::Utc>, f64)> =
+                                        series.iter().flat_map(|s| s.points.clone()).collect();
+                                    all_points.sort_by_key(|(ts, _)| *ts);
+                                    all_points.dedup_by_key(|(ts, _)| *ts);
+                                    if let Some(stats) =
+                                        gpu_npu_util_reporter::processor::aggregate(&all_points)
+                                    {
+                                        (Some(stats.avg), Some(stats.peak), Some(stats.peak_time))
+                                    } else {
+                                        (None, None, None)
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("主机 {} 句柄数指标查询失败：{e}", ip);
+                                    (None, None, None)
+                                }
+                            }
+                        } else {
+                            (None, None, None)
+                        };
+
                     // 填入该主机下所有卡记录
                     for rec in &mut records {
                         if rec.host_ip == *ip {
@@ -302,6 +330,9 @@ async fn main() -> ExitCode {
                             rec.host_mem_avg = mem_avg;
                             rec.host_mem_peak = mem_peak;
                             rec.host_mem_peak_time = mem_peak_t;
+                            rec.host_handle_avg = handle_avg;
+                            rec.host_handle_peak = handle_peak;
+                            rec.host_handle_peak_time = handle_peak_t;
                         }
                     }
                 }

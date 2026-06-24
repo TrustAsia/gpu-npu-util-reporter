@@ -283,6 +283,9 @@ pub async fn collect_device(
             host_mem_avg: None,
             host_mem_peak: None,
             host_mem_peak_time: None,
+            host_handle_avg: None,
+            host_handle_peak: None,
+            host_handle_peak_time: None,
             range_start: ctx.start,
             range_end: ctx.end,
         });

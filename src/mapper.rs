@@ -80,6 +80,13 @@ const HOST_MEM_COLUMNS: &[&str] = &[
     "主机内存利用率峰值出现时间",
 ];
 
+/// 主机句柄数列（启用主机指标且配置了 handle_metric 时出现）。
+const HOST_HANDLE_COLUMNS: &[&str] = &[
+    "主机句柄数平均值",
+    "主机句柄数峰值",
+    "主机句柄数峰值出现时间",
+];
+
 /// 标志位：哪些可选指标组应出现在基础列中。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ColumnFlags {
@@ -87,6 +94,7 @@ pub struct ColumnFlags {
     pub has_power: bool,
     pub has_host_cpu: bool,
     pub has_host_mem: bool,
+    pub has_host_handle: bool,
 }
 
 /// 根据配置构建基础列有序清单。
@@ -106,6 +114,9 @@ pub fn build_base_columns(flags: ColumnFlags) -> Vec<String> {
     }
     if flags.has_host_mem {
         cols.extend(HOST_MEM_COLUMNS.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_host_handle {
+        cols.extend(HOST_HANDLE_COLUMNS.iter().map(|s| (*s).to_string()));
     }
     cols
 }
@@ -591,6 +602,9 @@ mod tests {
             host_mem_avg: None,
             host_mem_peak: None,
             host_mem_peak_time: None,
+            host_handle_avg: None,
+            host_handle_peak: None,
+            host_handle_peak_time: None,
             range_start: Utc.timestamp_opt(0, 0).unwrap(),
             range_end: Utc.timestamp_opt(60, 0).unwrap(),
         }

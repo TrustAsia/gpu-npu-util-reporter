@@ -326,6 +326,14 @@ fn cell_value(
             .host_mem_peak_time
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
+        "主机句柄数平均值" => rec.host_handle_avg.map_or(CellValue::Na, CellValue::Number),
+        "主机句柄数峰值" => rec
+            .host_handle_peak
+            .map_or(CellValue::Na, CellValue::Number),
+        "主机句柄数峰值出现时间" => rec
+            .host_handle_peak_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
         other => {
             // 映射列：从 mapping_borrowed 取，未命中写空串
             mapping_borrowed.get(&(row_idx, other)).map_or_else(
