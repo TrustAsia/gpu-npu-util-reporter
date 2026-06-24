@@ -45,12 +45,18 @@ pub enum OwnershipMode {
 }
 
 impl OwnershipMode {
-    /// 从配置字符串解析；未知值回退到 `LastInRange`（与默认配置一致）。
+    /// 从配置字符串解析；未知值回退到 `LastInRange`（与默认配置一致）并记录警告。
     #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim() {
             "instant" => Self::Instant,
-            _ => Self::LastInRange,
+            "last_in_range" => Self::LastInRange,
+            other => {
+                tracing::warn!(
+                    "ownership.mode「{other}」不是有效值（支持 instant/last_in_range），使用默认 last_in_range"
+                );
+                Self::LastInRange
+            }
         }
     }
 }

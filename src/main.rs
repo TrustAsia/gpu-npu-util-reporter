@@ -82,7 +82,7 @@ async fn main() -> ExitCode {
     //    需按配置时区解释为本地时间后转 UTC。
     let now = Utc::now();
     let tz: chrono_tz::Tz = cfg.timezone.parse().unwrap_or_else(|_| {
-        error!("时区「{}」无效，使用默认 Asia/Shanghai", cfg.timezone);
+        eprintln!("[警告] 时区「{}」无效，使用默认 Asia/Shanghai", cfg.timezone);
         "Asia/Shanghai".parse().unwrap()
     });
     // 第一遍：尝试解析 start（仅 now 上下文）
@@ -198,13 +198,18 @@ async fn main() -> ExitCode {
 
     // 5.5. 主机指标采集（可选，通用指标）
     let mut column_flags = ColumnFlags::default();
-    // 检查是否有设备配置了温度/功率指标
-    for spec in cfg.devices.values() {
-        if spec.temp_metric.is_some() {
-            column_flags.has_temp = true;
-        }
-        if spec.power_metric.is_some() {
-            column_flags.has_power = true;
+    // 检查是否有设备配置了温度/功率指标（仅检查被数据源实际引用的设备类型，
+    // 避免未引用的设备类型在报表中产生全 N/A 的额外列）
+    let active_device_keys: std::collections::HashSet<&String> =
+        cfg.sources.iter().flat_map(|s| &s.device_types).collect();
+    for (key, spec) in &cfg.devices {
+        if active_device_keys.contains(key) {
+            if spec.temp_metric.is_some() {
+                column_flags.has_temp = true;
+            }
+            if spec.power_metric.is_some() {
+                column_flags.has_power = true;
+            }
         }
     }
     if let Some(hm) = &cfg.host_metrics {

@@ -215,7 +215,7 @@ pub fn default_config_yaml() -> String {
 #
 #   相对时间语法：<锚点>[+|-]<数值><单位>
 #     锚点：now=当前时刻  start=起始时间  end=结束时间
-#     单位：s(秒) m(分) h(时) d(天) w(周) M(月) y(年)
+#     单位：s(秒) m(分) h(时) d(天) M(月) y(年)
 #
 #   示例：
 #     now-7d   → 7 天前
@@ -558,7 +558,8 @@ report:
 /// 带 `DeviceSpec` 序列化后按 `level` 层（每层 2 空格）缩进，嵌入到 `key:` 下方。
 /// `serde_yaml_ng` 顶层可能带一个 `---` 文档标记，需去掉。
 fn indent_device(level: usize, spec: &DeviceSpec) -> String {
-    let yaml = serde_yaml_ng::to_string(spec).unwrap_or_default();
+    let yaml = serde_yaml_ng::to_string(spec)
+        .expect("DeviceSpec 序列化失败——这应是代码 bug，不会由用户输入触发");
     let pad = " ".repeat(level * 2);
     yaml.lines()
         .filter(|l| !l.trim_start().starts_with("---"))
