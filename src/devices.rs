@@ -254,4 +254,23 @@ mod tests {
         let back: DeviceSpec = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(s, back);
     }
+
+    #[test]
+    fn memory_strategy_untagged_rejects_ambiguous_yaml() {
+        // serde(untagged) + deny_unknown_fields：当 YAML 同时含 composite_ratio 和
+        // direct_metric 键时，两个变体都因多余字段被拒绝，返回解析错误。
+        // 这是正确行为——含糊配置不应静默匹配到错误变体。
+        let yaml = r#"
+composite_ratio:
+  used: "metric_a"
+  free: "metric_b"
+direct_metric:
+  metric: "metric_c"
+"#;
+        let result: Result<MemoryStrategy, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "含糊的 YAML（同时含多个变体键）应被拒绝，而非静默匹配"
+        );
+    }
 }
