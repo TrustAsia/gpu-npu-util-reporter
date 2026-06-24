@@ -409,10 +409,13 @@ pub(crate) fn cell_value_for_db(
         "主机句柄数峰值" => rec.host_handle_peak.map(|v| format!("{v:.2}")),
         "主机句柄数峰值出现时间" => rec.host_handle_peak_time.map(ts),
         other => {
-            // 映射列：从 mapping_borrowed 取，空串也写入（非 NULL）
-            mapping_borrowed
-                .get(&(row_idx, other))
-                .map(|v| (*v).to_string())
+            // 映射列：从 mapping_borrowed 取，未命中写空串（非 NULL，与 Excel 行为一致）
+            Some(
+                mapping_borrowed
+                    .get(&(row_idx, other))
+                    .map(|v| (*v).to_string())
+                    .unwrap_or_default(),
+            )
         }
     }
 }
