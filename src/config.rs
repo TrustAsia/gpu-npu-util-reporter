@@ -685,6 +685,18 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
     // 校验设备配方中指标名/标签名的合法性，防止 PromQL 注入。
     // Prometheus 指标名: [a-zA-Z_:][a-zA-Z0-9_:]*
     // 标签名: [a-zA-Z_][a-zA-Z0-9_]*
+    let validate_label = |device_key: &str, field: &str, value: &str| -> Result<(), AppError> {
+        if !is_valid_label_name(value) {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!(
+                    "devices.{device_key}.labels.{field}「{value}」不是合法的 Prometheus 标签名"
+                ),
+            });
+        }
+        Ok(())
+    };
+
     for (key, spec) in &cfg.devices {
         if !is_valid_metric_name(&spec.core_util_metric) {
             return Err(AppError::Config {
@@ -704,51 +716,11 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 ),
             });
         }
-        if !is_valid_label_name(&spec.labels.host_ip) {
-            return Err(AppError::Config {
-                path: path.into(),
-                reason: format!(
-                    "devices.{}.labels.host_ip「{}」不是合法的 Prometheus 标签名",
-                    key, spec.labels.host_ip
-                ),
-            });
-        }
-        if !is_valid_label_name(&spec.labels.node_name) {
-            return Err(AppError::Config {
-                path: path.into(),
-                reason: format!(
-                    "devices.{}.labels.node_name「{}」不是合法的 Prometheus 标签名",
-                    key, spec.labels.node_name
-                ),
-            });
-        }
-        if !is_valid_label_name(&spec.labels.container) {
-            return Err(AppError::Config {
-                path: path.into(),
-                reason: format!(
-                    "devices.{}.labels.container「{}」不是合法的 Prometheus 标签名",
-                    key, spec.labels.container
-                ),
-            });
-        }
-        if !is_valid_label_name(&spec.labels.pod) {
-            return Err(AppError::Config {
-                path: path.into(),
-                reason: format!(
-                    "devices.{}.labels.pod「{}」不是合法的 Prometheus 标签名",
-                    key, spec.labels.pod
-                ),
-            });
-        }
-        if !is_valid_label_name(&spec.labels.namespace) {
-            return Err(AppError::Config {
-                path: path.into(),
-                reason: format!(
-                    "devices.{}.labels.namespace「{}」不是合法的 Prometheus 标签名",
-                    key, spec.labels.namespace
-                ),
-            });
-        }
+        validate_label(key, "host_ip", &spec.labels.host_ip)?;
+        validate_label(key, "node_name", &spec.labels.node_name)?;
+        validate_label(key, "container", &spec.labels.container)?;
+        validate_label(key, "pod", &spec.labels.pod)?;
+        validate_label(key, "namespace", &spec.labels.namespace)?;
         // 校验显存策略中的指标名
         validate_memory_metrics(&spec.memory, key, path)?;
         // 校验温度/功率指标名（可选）

@@ -81,10 +81,11 @@ async fn main() -> ExitCode {
     //    注意：时区需在此前解析，因为绝对时间（如 "00:00:01"）
     //    需按配置时区解释为本地时间后转 UTC。
     let now = Utc::now();
-    let tz: chrono_tz::Tz = cfg.timezone.parse().unwrap_or_else(|_| {
-        eprintln!("[警告] 时区「{}」无效，使用默认 Asia/Shanghai", cfg.timezone);
-        "Asia/Shanghai".parse().unwrap()
-    });
+    // 时区已在 validate_config 中校验，此处必然成功。
+    let tz: chrono_tz::Tz = cfg
+        .timezone
+        .parse()
+        .expect("timezone already validated in config");
     // 第一遍：尝试解析 start（仅 now 上下文）
     let start = if let Ok(t) = resolve_time(&cfg.time_range.start, now, None, None, tz) {
         t
@@ -256,78 +257,26 @@ async fn main() -> ExitCode {
 
                     // 查询 CPU 利用率
                     let cpu_promql = format!("{}{{{}}}", hm.cpu_metric, label_filter);
-                    let (cpu_avg, cpu_peak, cpu_peak_t) = match host_fetcher
-                        .query_range(&cpu_promql, start, end, step)
-                        .await
-                    {
-                        Ok(series) => {
-                            // 合并所有 series 的点
-                            let mut all_points: Vec<(chrono::DateTime<chrono::Utc>, f64)> =
-                                series.iter().flat_map(|s| s.points.clone()).collect();
-                            all_points.sort_by_key(|(ts, _)| *ts);
-                            all_points.dedup_by_key(|(ts, _)| *ts);
-                            if let Some(stats) =
-                                gpu_npu_util_reporter::processor::aggregate(&all_points)
-                            {
-                                (Some(stats.avg), Some(stats.peak), Some(stats.peak_time))
-                            } else {
-                                (None, None, None)
-                            }
-                        }
-                        Err(e) => {
-                            warn!("主机 {} CPU 指标查询失败：{e}", ip);
-                            (None, None, None)
-                        }
-                    };
+                    let (cpu_avg, cpu_peak, cpu_peak_t) = query_host_metric(
+                        &host_fetcher, &cpu_promql, start, end, step, ip, "CPU",
+                    )
+                    .await;
 
                     // 查询内存利用率
                     let mem_promql = format!("{}{{{}}}", hm.mem_metric, label_filter);
-                    let (mem_avg, mem_peak, mem_peak_t) = match host_fetcher
-                        .query_range(&mem_promql, start, end, step)
-                        .await
-                    {
-                        Ok(series) => {
-                            let mut all_points: Vec<(chrono::DateTime<chrono::Utc>, f64)> =
-                                series.iter().flat_map(|s| s.points.clone()).collect();
-                            all_points.sort_by_key(|(ts, _)| *ts);
-                            all_points.dedup_by_key(|(ts, _)| *ts);
-                            if let Some(stats) =
-                                gpu_npu_util_reporter::processor::aggregate(&all_points)
-                            {
-                                (Some(stats.avg), Some(stats.peak), Some(stats.peak_time))
-                            } else {
-                                (None, None, None)
-                            }
-                        }
-                        Err(e) => {
-                            warn!("主机 {} 内存指标查询失败：{e}", ip);
-                            (None, None, None)
-                        }
-                    };
+                    let (mem_avg, mem_peak, mem_peak_t) = query_host_metric(
+                        &host_fetcher, &mem_promql, start, end, step, ip, "内存",
+                    )
+                    .await;
 
                     // 查询句柄数（可选）
                     let (handle_avg, handle_peak, handle_peak_t) =
                         if let Some(handle_metric) = &hm.handle_metric {
                             let h_promql = format!("{handle_metric}{{{}}}", label_filter);
-                            match host_fetcher.query_range(&h_promql, start, end, step).await {
-                                Ok(series) => {
-                                    let mut all_points: Vec<(chrono::DateTime<chrono::Utc>, f64)> =
-                                        series.iter().flat_map(|s| s.points.clone()).collect();
-                                    all_points.sort_by_key(|(ts, _)| *ts);
-                                    all_points.dedup_by_key(|(ts, _)| *ts);
-                                    if let Some(stats) =
-                                        gpu_npu_util_reporter::processor::aggregate(&all_points)
-                                    {
-                                        (Some(stats.avg), Some(stats.peak), Some(stats.peak_time))
-                                    } else {
-                                        (None, None, None)
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("主机 {} 句柄数指标查询失败：{e}", ip);
-                                    (None, None, None)
-                                }
-                            }
+                            query_host_metric(
+                                &host_fetcher, &h_promql, start, end, step, ip, "句柄数",
+                            )
+                            .await
                         } else {
                             (None, None, None)
                         };
@@ -471,6 +420,34 @@ async fn main() -> ExitCode {
     }
     info!("运行完成");
     ExitCode::SUCCESS
+}
+
+/// 查询主机指标（CPU/内存/句柄数），合并所有 series 的点后聚合为 (avg, peak, peak_time)。
+async fn query_host_metric(
+    fetcher: &PrometheusFetcher,
+    promql: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    step: Duration,
+    ip: &str,
+    label: &str,
+) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
+    match fetcher.query_range(promql, start, end, step).await {
+        Ok(series) => {
+            let mut all_points: Vec<(DateTime<Utc>, f64)> =
+                series.iter().flat_map(|s| s.points.clone()).collect();
+            all_points.sort_by_key(|(ts, _)| *ts);
+            all_points.dedup_by_key(|(ts, _)| *ts);
+            gpu_npu_util_reporter::processor::aggregate(&all_points).map_or(
+                (None, None, None),
+                |s| (Some(s.avg), Some(s.peak), Some(s.peak_time)),
+            )
+        }
+        Err(e) => {
+            warn!("主机 {ip} {label} 指标查询失败：{e}");
+            (None, None, None)
+        }
+    }
 }
 
 /// 解析时间字符串（支持绝对时间和相对时间表达式）。

@@ -310,16 +310,27 @@ pub async fn collect_device(
 fn merge_into(slot: &mut Option<Series>, incoming: Series) {
     match slot {
         Some(existing) => {
-            existing.points.extend(incoming.points);
-            existing.points.sort_by_key(|(ts, _)| *ts);
-            // 同一时间戳保留最后一个值（最新观测），丢弃更早的点。
-            // dedup_by 保留首个元素，因此先反转，去重后再反转回来。
-            existing.points.reverse();
-            existing.points.dedup_by(|a, b| a.0 == b.0);
-            existing.points.reverse();
+            merge_points_into(&mut existing.points, incoming.points);
         }
         None => *slot = Some(incoming),
     }
+}
+
+/// 将 incoming 的点合并进 existing，按时间戳排序并去重（同一时间戳保留最后值）。
+///
+/// 供 `merge_into`（pipeline 层按 join key 合并）和
+/// `merge_series`（fetcher 层按 label 合并）复用。
+pub(crate) fn merge_points_into(
+    existing: &mut Vec<(chrono::DateTime<chrono::Utc>, f64)>,
+    incoming: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
+) {
+    existing.extend(incoming);
+    existing.sort_by_key(|(ts, _)| *ts);
+    // 同一时间戳保留最后一个值（最新观测），丢弃更早的点。
+    // dedup_by 保留首个元素，因此先反转，去重后再反转回来。
+    existing.reverse();
+    existing.dedup_by(|a, b| a.0 == b.0);
+    existing.reverse();
 }
 
 /// 查询并吞错为 Warning（C2 修复：不再静默 `.unwrap_or_default()`）。

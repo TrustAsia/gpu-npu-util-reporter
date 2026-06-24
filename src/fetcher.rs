@@ -270,13 +270,7 @@ fn merge_series(all_series: &mut Vec<Series>, incoming: Vec<Series>) {
     for s in incoming {
         // 查找已有 series 中是否有完全相同的标签集
         if let Some(existing) = all_series.iter_mut().find(|e| e.labels == s.labels) {
-            existing.points.extend(s.points);
-            existing.points.sort_by_key(|(ts, _)| *ts);
-            // 同一时间戳保留最后一个值（最新观测），与 merge_into 一致。
-            // dedup_by 保留首个元素，因此先反转，去重后再反转回来。
-            existing.points.reverse();
-            existing.points.dedup_by(|a, b| a.0 == b.0);
-            existing.points.reverse();
+            crate::pipeline::merge_points_into(&mut existing.points, s.points);
         } else {
             all_series.push(s);
         }
