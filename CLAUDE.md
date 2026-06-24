@@ -15,3 +15,7 @@ CI Release 行为：
 ## 推送规则
 
 每次代码修改完成后**必须**同步推送到 GitHub（`git add` → `git commit` → `git push`），确保远程仓库与本地一致。
+
+## CI Workflow 规则
+
+非必要**不要修改** `.github/workflows/` 下的文件。仅当修复 CI 自身故障或用户明确要求时才可改动。
