@@ -436,8 +436,11 @@ async fn query_host_metric(
         Ok(series) => {
             let mut all_points: Vec<(DateTime<Utc>, f64)> =
                 series.iter().flat_map(|s| s.points.clone()).collect();
-            all_points.sort_by_key(|(ts, _)| *ts);
-            all_points.dedup_by_key(|(ts, _)| *ts);
+            // 与 pipeline::merge_points_into 语义一致：同一时间戳保留最后一个值。
+            all_points.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            all_points.reverse();
+            all_points.dedup_by(|a, b| a.0 == b.0);
+            all_points.reverse();
             gpu_npu_util_reporter::processor::aggregate(&all_points).map_or(
                 (None, None, None),
                 |s| (Some(s.avg), Some(s.peak), Some(s.peak_time)),
