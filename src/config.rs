@@ -154,6 +154,49 @@ const fn default_step() -> u64 {
     60
 }
 
+/// 数据库列映射配置：本地列名 → 数据库列名 + 注释。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnMapping {
+    /// 本地列名（报表中的列名，如"主机IP"、"核心利用率平均值"）。
+    pub local_name: String,
+    /// 数据库列名（如"host_ip"、"core_avg"）。
+    pub db_name: String,
+    /// 数据库列注释（说明该列含义，如"主机IP地址"）。
+    #[serde(default)]
+    pub comment: String,
+}
+
+/// MySQL 数据库推送配置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseConfig {
+    /// 是否启用数据库推送。
+    #[serde(default)]
+    pub enabled: bool,
+    /// MySQL 主机地址。
+    pub host: String,
+    /// MySQL 端口（默认 3306）。
+    #[serde(default = "default_mysql_port")]
+    pub port: u16,
+    /// MySQL 用户名。
+    pub username: String,
+    /// MySQL 密码。
+    #[serde(default)]
+    pub password: String,
+    /// MySQL 数据库名。
+    pub database: String,
+    /// 目标表名。
+    pub table: String,
+    /// 列映射：本地列名 → 数据库列名 + 注释。
+    /// 未在此列表中的本地列不会写入数据库。
+    pub columns: Vec<ColumnMapping>,
+}
+
+fn default_mysql_port() -> u16 {
+    3306
+}
+
 /// 应用顶层配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -180,6 +223,9 @@ pub struct AppConfig {
     /// 主机指标采集配置（可选）。
     #[serde(default)]
     pub host_metrics: Option<HostMetricsConfig>,
+    /// MySQL 数据库推送配置（可选）。
+    #[serde(default)]
+    pub database: Option<DatabaseConfig>,
 }
 
 fn default_timezone() -> String {
@@ -549,6 +595,78 @@ log:
 report:
   output_path: "./utilization-report.xlsx"
   query_step_secs: 60
+
+# =============================================================================
+# 十一、MySQL 数据库推送 — 将采集结果写入 MySQL 表（可选）
+# =============================================================================
+# 启用后，程序在生成 Excel 报表的同时，将每条卡记录作为一行写入 MySQL 表。
+# 运行时自动检测表结构：
+#   - 表不存在 → 自动创建（含列注释）
+#   - 表存在但缺少配置中的列 → 停止运行并生成 DDL SQL 文件
+#   - 表中有多余的列（本地未配置）→ 询问用户：忽略多余列继续，或退出并生成 DDL
+#
+# columns 定义本地列名到数据库列名的映射：
+#   local_name — 报表中的列名（如"主机IP"、"核心利用率平均值"）
+#   db_name    — MySQL 表中的列名（如"host_ip"、"core_avg"）
+#   comment    — MySQL 列注释（说明该列含义，如"主机IP地址"）
+#
+# 未在 columns 中配置的本地列不会写入数据库。
+# 资产映射列（如"机房位置"）也可配置映射，与基础列同等对待。
+#
+#database:
+#  enabled: false
+#  host: "127.0.0.1"
+#  port: 3306
+#  username: "reporter"
+#  password: ""
+#  database: "gpu_npu_monitor"
+#  table: "utilization"
+#  columns:
+#    - local_name: "数据来源"
+#      db_name: "source_name"
+#      comment: "Prometheus数据源别名"
+#    - local_name: "主机IP"
+#      db_name: "host_ip"
+#      comment: "主机IP地址"
+#    - local_name: "节点名称"
+#      db_name: "node_name"
+#      comment: "Kubernetes节点名称"
+#    - local_name: "计算卡编号"
+#      db_name: "card_id"
+#      comment: "GPU/NPU设备编号"
+#    - local_name: "设备类型"
+#      db_name: "device_type"
+#      comment: "设备类型显示名"
+#    - local_name: "Namespace"
+#      db_name: "namespace"
+#      comment: "Kubernetes命名空间"
+#    - local_name: "Pod"
+#      db_name: "pod"
+#      comment: "Kubernetes Pod名称"
+#    - local_name: "容器名称"
+#      db_name: "container"
+#      comment: "容器名称"
+#    - local_name: "取值时间范围"
+#      db_name: "time_range"
+#      comment: "数据采集时间范围"
+#    - local_name: "核心利用率平均值"
+#      db_name: "core_avg"
+#      comment: "核心利用率平均值(0-100%)"
+#    - local_name: "核心利用率峰值"
+#      db_name: "core_peak"
+#      comment: "核心利用率峰值(0-100%)"
+#    - local_name: "核心利用率峰值出现时间"
+#      db_name: "core_peak_time"
+#      comment: "核心利用率峰值出现时间"
+#    - local_name: "显存占用率平均值"
+#      db_name: "mem_avg"
+#      comment: "显存占用率平均值(0-100%)"
+#    - local_name: "显存占用率峰值"
+#      db_name: "mem_peak"
+#      comment: "显存占用率峰值(0-100%)"
+#    - local_name: "显存占用率峰值出现时间"
+#      db_name: "mem_peak_time"
+#      comment: "显存占用率峰值出现时间"
 "##;
     TEMPLATE
         .replace("__NVIDIA__", &indent_device(2, &nvidia_a10_spec()))
@@ -848,6 +966,84 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             }
         }
     }
+
+    // 校验数据库配置
+    if let Some(db) = &cfg.database {
+        if db.enabled {
+            if db.host.is_empty() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: "database.host 不能为空".into(),
+                });
+            }
+            if db.database.is_empty() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: "database.database 不能为空".into(),
+                });
+            }
+            if db.table.is_empty() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: "database.table 不能为空".into(),
+                });
+            }
+            if db.username.is_empty() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: "database.username 不能为空".into(),
+                });
+            }
+            if db.columns.is_empty() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: "database.columns 不能为空——至少需要配置一列映射".into(),
+                });
+            }
+            // 校验列映射：db_name 必须是合法的 MySQL 列名
+            let mut seen_db_names = std::collections::HashSet::new();
+            let mut seen_local_names = std::collections::HashSet::new();
+            for col in &db.columns {
+                if col.local_name.is_empty() {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: "database.columns 中 local_name 不能为空".into(),
+                    });
+                }
+                if col.db_name.is_empty() {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "database.columns 中 local_name「{}」的 db_name 不能为空",
+                            col.local_name
+                        ),
+                    });
+                }
+                if !is_valid_mysql_identifier(&col.db_name) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "database.columns 中 db_name「{}」不是合法的 MySQL 标识符（仅允许字母/数字/下划线，不超过64字符）",
+                            col.db_name
+                        ),
+                    });
+                }
+                if !seen_db_names.insert(&col.db_name) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!("database.columns 中 db_name「{}」重复", col.db_name),
+                    });
+                }
+                if !seen_local_names.insert(&col.local_name) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!("database.columns 中 local_name「{}」重复", col.local_name),
+                    });
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -935,6 +1131,19 @@ fn is_valid_label_name(s: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// MySQL 标识符合法性：`[a-zA-Z_][a-zA-Z0-9_]*`，长度 ≤ 64。
+fn is_valid_mysql_identifier(s: &str) -> bool {
+    if s.len() > 64 || s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().expect("checked non-empty");
     if !first.is_ascii_alphabetic() && first != '_' {
         return false;
     }
@@ -1323,5 +1532,89 @@ mod tests {
             msg.contains("fallback") || msg.contains("嵌套"),
             "错误信息应提及 fallback 嵌套"
         );
+    }
+
+    #[test]
+    fn is_valid_mysql_identifier_accepts_valid() {
+        assert!(is_valid_mysql_identifier("host_ip"));
+        assert!(is_valid_mysql_identifier("core_avg"));
+        assert!(is_valid_mysql_identifier("_private"));
+        assert!(is_valid_mysql_identifier("a"));
+        assert!(is_valid_mysql_identifier(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn is_valid_mysql_identifier_rejects_invalid() {
+        assert!(!is_valid_mysql_identifier("")); // 空
+        assert!(!is_valid_mysql_identifier("1digit")); // 数字开头
+        assert!(!is_valid_mysql_identifier("host-ip")); // 连字符
+        assert!(!is_valid_mysql_identifier("host ip")); // 空格
+        assert!(!is_valid_mysql_identifier(&"x".repeat(65))); // 超长
+    }
+
+    #[test]
+    fn database_config_rejects_empty_columns() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 columns 应被拒绝");
+    }
+
+    #[test]
+    fn database_config_rejects_duplicate_db_names() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![
+                ColumnMapping {
+                    local_name: "主机IP".into(),
+                    db_name: "host_ip".into(),
+                    comment: "IP".into(),
+                },
+                ColumnMapping {
+                    local_name: "节点名称".into(),
+                    db_name: "host_ip".into(), // 重复
+                    comment: "Node".into(),
+                },
+            ],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "重复 db_name 应被拒绝");
+    }
+
+    #[test]
+    fn database_config_rejects_invalid_db_name() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "主机IP".into(),
+                db_name: "host-ip".into(), // 连字符不合法
+                comment: "IP".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "不合法 db_name 应被拒绝");
     }
 }

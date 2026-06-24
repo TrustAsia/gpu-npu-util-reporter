@@ -337,6 +337,86 @@ fn cell_value(
     }
 }
 
+/// 从 `CardRecord` + 资产值取出某列对应的数据库值。
+///
+/// 与 [`cell_value`] 类似，但返回 `Option<String>`：
+/// - `None` → 数据库 NULL（对应 N/A）
+/// - `Some(v)` → 实际值字符串
+///
+/// 百分比列存原始 0–100 值（不除以 100），绝对值列直接转字符串，
+/// 时间列转为 `YYYY-MM-DD HH:MM:SS` 格式。
+pub(crate) fn cell_value_for_db(
+    rec: &CardRecord,
+    col: &str,
+    mapping_borrowed: &HashMap<(usize, &str), &str>,
+    row_idx: usize,
+    tz: Tz,
+) -> Option<String> {
+    let ts = |dt: chrono::DateTime<chrono::Utc>| {
+        dt.with_timezone(&tz)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    };
+    match col {
+        "数据来源" => Some(rec.source_name.clone()),
+        "主机IP" => Some(rec.host_ip.clone()),
+        "节点名称" => Some(rec.node_name.clone()),
+        "计算卡编号" => Some(rec.card_id.clone()),
+        "设备类型" => Some(rec.device_type.clone()),
+        "Namespace" => Some(rec.namespace.clone()),
+        "Pod" => Some(rec.pod.clone()),
+        "容器名称" => Some(rec.container.clone()),
+        "取值时间范围" => Some(format!(
+            "{} ~ {}",
+            rec.range_start
+                .with_timezone(&tz)
+                .format("%Y-%m-%d %H:%M:%S"),
+            rec.range_end.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S")
+        )),
+        // 百分比列：存 0–100 原始值
+        "核心利用率平均值" => rec.core_avg.map(|v| format!("{v:.2}")),
+        "核心利用率峰值" => rec.core_peak.map(|v| format!("{v:.2}")),
+        "核心利用率峰值出现时间" => rec.core_peak_time.map(ts),
+        "核心利用率数据量" => rec.core_count.map(|n| n.to_string()),
+        "核心利用率首条数据时间" => rec.core_first_time.map(ts),
+        "核心利用率末条数据时间" => rec.core_last_time.map(ts),
+        "显存占用率平均值" => rec.mem_avg.map(|v| format!("{v:.2}")),
+        "显存占用率峰值" => rec.mem_peak.map(|v| format!("{v:.2}")),
+        "显存占用率峰值出现时间" => rec.mem_peak_time.map(ts),
+        "显存占用率数据量" => rec.mem_count.map(|n| n.to_string()),
+        "显存占用率首条数据时间" => rec.mem_first_time.map(ts),
+        "显存占用率末条数据时间" => rec.mem_last_time.map(ts),
+        // 绝对值列
+        "设备温度平均值" => rec.temp_avg.map(|v| format!("{v:.2}")),
+        "设备温度峰值" => rec.temp_peak.map(|v| format!("{v:.2}")),
+        "设备温度峰值出现时间" => rec.temp_peak_time.map(ts),
+        "设备温度数据量" => rec.temp_count.map(|n| n.to_string()),
+        "设备温度首条数据时间" => rec.temp_first_time.map(ts),
+        "设备温度末条数据时间" => rec.temp_last_time.map(ts),
+        "设备功率平均值" => rec.power_avg.map(|v| format!("{v:.2}")),
+        "设备功率峰值" => rec.power_peak.map(|v| format!("{v:.2}")),
+        "设备功率峰值出现时间" => rec.power_peak_time.map(ts),
+        "设备功率数据量" => rec.power_count.map(|n| n.to_string()),
+        "设备功率首条数据时间" => rec.power_first_time.map(ts),
+        "设备功率末条数据时间" => rec.power_last_time.map(ts),
+        "主机CPU利用率平均值" => rec.host_cpu_avg.map(|v| format!("{v:.2}")),
+        "主机CPU利用率峰值" => rec.host_cpu_peak.map(|v| format!("{v:.2}")),
+        "主机CPU利用率峰值出现时间" => rec.host_cpu_peak_time.map(ts),
+        "主机内存利用率平均值" => rec.host_mem_avg.map(|v| format!("{v:.2}")),
+        "主机内存利用率峰值" => rec.host_mem_peak.map(|v| format!("{v:.2}")),
+        "主机内存利用率峰值出现时间" => rec.host_mem_peak_time.map(ts),
+        "主机句柄数平均值" => rec.host_handle_avg.map(|v| format!("{v:.2}")),
+        "主机句柄数峰值" => rec.host_handle_peak.map(|v| format!("{v:.2}")),
+        "主机句柄数峰值出现时间" => rec.host_handle_peak_time.map(ts),
+        other => {
+            // 映射列：从 mapping_borrowed 取，空串也写入（非 NULL）
+            mapping_borrowed
+                .get(&(row_idx, other))
+                .map(|v| (*v).to_string())
+        }
+    }
+}
+
 /// 估算字符串在 Excel 列里的显示宽度（用于 I6 列宽自适应）。
 ///
 /// 规则：CJK 字符（含全角标点）按 2 个单位计，其余按 1 个单位；末尾留 ~2 单位

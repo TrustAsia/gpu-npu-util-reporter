@@ -415,6 +415,29 @@ async fn main() -> ExitCode {
         }
     }
 
+    // 9. 数据库推送（可选）
+    if let Some(db_cfg) = &cfg.database {
+        if db_cfg.enabled {
+            info!("开始推送数据到 MySQL");
+            match gpu_npu_util_reporter::db::push_to_database(
+                &records,
+                db_cfg,
+                &mapping_values,
+                &base_columns,
+                &mapping_columns,
+                tz,
+            )
+            .await
+            {
+                Ok(()) => info!("数据库推送完成"),
+                Err(e) => {
+                    error!("{e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+    }
+
     if !warnings.is_empty() {
         warn!("共 {} 条警告", warnings.len());
         for w in &warnings {

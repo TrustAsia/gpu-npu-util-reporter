@@ -5,6 +5,7 @@
 pub(crate) const MAX_FALLBACK_DEPTH: usize = 10;
 
 pub mod config;
+pub mod db;
 pub mod devices;
 pub mod error;
 pub mod fetcher;

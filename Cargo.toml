@@ -1,6 +1,6 @@
 [package]
 name = "gpu-npu-util-reporter"
-version = "1.5.12"
+version = "1.6.0"
 edition = "2021"
 description = "从多个 Prometheus 数据源提取 GPU/NPU 计算卡利用率与显存占用，聚合后生成带阈值染色的 Excel 报表。"
 license = "MIT"
@@ -33,3 +33,4 @@ async-trait = "0.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2.5"
+sqlx = { version = "0.8", features = ["mysql", "runtime-tokio", "tls-rustls"], default-features = false }

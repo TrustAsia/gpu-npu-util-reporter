@@ -49,6 +49,10 @@ pub enum AppError {
     #[error("[错误] 报表写入失败：{detail}")]
     Report { detail: String },
 
+    /// 数据库操作失败（连接、schema 校验、写入等）。
+    #[error("[错误] 数据库操作失败：{detail}")]
+    Database { detail: String },
+
     /// 非致命警告：仅记录、不中断。
     /// 预留给未来"单卡失败降级告警"的统一通道，当前 main 直接收集字符串。
     #[allow(dead_code)]
