@@ -250,8 +250,9 @@ async fn main() -> ExitCode {
                     // host_label 值可能为裸 IP 或 "ip:port" 格式，用 ($|:) 精确锚定边界。
                     let ip_regex = if ip.contains(':') {
                         // IPv6：host_label 值可能为 [ip]:port，正则需匹配字面方括号。
-                        // Go 字符串字面量中 \\[ 解析为 \[，RE2 匹配字面 [。
-                        format!("^\\[{escaped_ip}\\]($|:)")
+                        // Go 字符串字面量中 \\\\ 解析为 \\，RE2 将 \\[ 视为字面 [。
+                        // Rust "\\\\[" = 3字符 "\\["，嵌入 PromQL 后 Go 解析为 "\["，RE2 匹配字面 [。
+                        format!("^\\\\[{escaped_ip}\\\\]($|:)")
                     } else {
                         format!("^{escaped_ip}($|:)")
                     };

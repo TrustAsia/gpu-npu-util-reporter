@@ -549,8 +549,9 @@ async fn query_with_ip_fallback(
             let ip_regex_escaped = escape_promql_regex(host_ip);
             let ip_regex = if host_ip.contains(':') {
                 // IPv6：instance 为 [ip]:port，正则需匹配字面方括号。
-                // Go 字符串字面量中 \\[ 解析为 \[，RE2 匹配字面 [。
-                format!("^\\[{ip_regex_escaped}\\]:")
+                // Go 字符串字面量中 \\\\ 解析为 \\，RE2 将 \\[ 视为字面 [。
+                // Rust "\\\\[" = 3字符 "\\["，嵌入 PromQL 后 Go 解析为 "\["，RE2 匹配字面 [。
+                format!("^\\\\[{ip_regex_escaped}\\\\]:")
             } else {
                 format!("^{ip_regex_escaped}:")
             };
@@ -1620,5 +1621,25 @@ mod tests {
         assert_eq!(escape_promql_regex("{val}"), r"\\{val\\}");
         assert_eq!(escape_promql_regex("a|b"), r"a\\|b");
         assert_eq!(escape_promql_regex("^start$"), r"\\^start\\$");
+    }
+
+    #[test]
+    fn ipv4_instance_regex_produces_valid_go_string_literal() {
+        // IPv4: escape_promql_regex 对 . 产出双反斜杠
+        let escaped = escape_promql_regex("192.168.1.1");
+        let ip_regex = format!("^{escaped}:");
+        // 嵌入 PromQL 后应为 instance=~"^192\\.168\\.1\\.1:"
+        // Go 解析 \\ 为 \，RE2 看到 ^192\.168\.1\.1: 匹配字面 IP
+        assert_eq!(ip_regex, r"^192\\.168\\.1\\.1:");
+    }
+
+    #[test]
+    fn ipv6_instance_regex_produces_valid_go_string_literal() {
+        // IPv6: 方括号需 Go 字符串中 \\[ / \\]（Rust "\\\\[" = 3字符 "\\["）
+        let escaped = escape_promql_regex("2001:db8::1");
+        let ip_regex = format!("^\\\\[{escaped}\\\\]:");
+        // 嵌入 PromQL 后应为 instance=~"^\\[2001:db8::1\\]:"
+        // Go 解析 \\[ → \[, \\] → \]，RE2 看到 ^\[2001:db8::1\]: 匹配字面方括号
+        assert_eq!(ip_regex, r"^\\[2001:db8::1\\]:");
     }
 }
