@@ -159,7 +159,7 @@ async fn main() -> ExitCode {
     let mut warnings: Vec<String> = Vec::new();
     let mut records: Vec<CardRecord> = Vec::new();
     for src in &cfg.sources {
-        info!("开始采集数据源「{}」（{}）", src.name, src.url);
+        info!("开始采集数据源「{}」（{}）", src.name, AppError::redact_url(&src.url));
         let fetcher = PrometheusFetcher::new(src.name.clone(), src.url.clone(), src.timeout_secs);
         for dt_key in &src.device_types {
             let spec = if let Some(s) = cfg.devices.get(dt_key) {

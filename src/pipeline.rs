@@ -278,6 +278,23 @@ async fn fetch_with_warning(ctx: &mut QueryContext<'_>, promql: &str) -> Vec<Ser
 /// 标签（used 与 total 的 `__name__` 不同），全 label 相等永远不成立，会导致
 /// fallback 静默产出 0 点。改为按设备 join key 对齐。
 async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrategy) -> Vec<Series> {
+    fallback_used_total_inner(ctx, fallback, 0).await
+}
+
+/// `fallback_used_total` 的内部实现，带递归深度限制以防止配置错误导致的栈溢出。
+const MAX_FALLBACK_DEPTH: usize = 10;
+
+async fn fallback_used_total_inner(
+    ctx: &mut QueryContext<'_>,
+    fallback: &MemoryStrategy,
+    depth: usize,
+) -> Vec<Series> {
+    if depth > MAX_FALLBACK_DEPTH {
+        tracing::warn!(
+            "fallback 嵌套深度超过 {MAX_FALLBACK_DEPTH} 层，中止递归以避免栈溢出"
+        );
+        return Vec::new();
+    }
     match fallback {
         MemoryStrategy::CompositeFromTotal(body) => {
             fallback_composite_from_total_inner(
@@ -299,7 +316,7 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
             if !result.is_empty() {
                 result
             } else if let Some(inner_fb) = &b.direct_metric.fallback {
-                Box::pin(fallback_used_total(ctx, inner_fb.as_ref())).await
+                Box::pin(fallback_used_total_inner(ctx, inner_fb.as_ref(), depth + 1)).await
             } else {
                 Vec::new()
             }

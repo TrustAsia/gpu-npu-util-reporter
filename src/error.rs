@@ -65,20 +65,19 @@ impl AppError {
         matches!(self, Self::Warning { .. })
     }
 
-    /// 对 URL 中的凭据做脱敏处理：移除 `user:pass@` 部分。
+    /// 对 URL 中的凭据做脱敏处理：移除 `user[:pass]@` 部分。
     ///
     /// 防止日志中泄露嵌入在 URL 中的用户名/密码
-    /// （如 `http://user:pass@prometheus:9090` → `http://prometheus:9090`）。
+    /// （如 `http://user:pass@prometheus:9090` → `http://prometheus:9090`，
+    ///   `http://user@prometheus:9090` → `http://prometheus:9090`）。
     pub fn redact_url(url: &str) -> String {
-        // 查找 :// 后的 user:pass@ 部分
+        // 查找 :// 后的 user[:pass]@ 部分
+        // 只要 @ 出现在 :// 之后，即认为是 userinfo（RFC 3986），全部脱敏。
+        // IPv6 地址在 URL 中使用方括号（[::1]）不含 @，因此不会误判。
         if let Some(scheme_end) = url.find("://") {
             let rest = &url[scheme_end + 3..];
             if let Some(at_pos) = rest.find('@') {
-                let before_at = &rest[..at_pos];
-                // 仅当 @ 之前含 :（user:pass 格式）时才脱敏，避免误处理 IPv6 地址
-                if before_at.contains(':') {
-                    return format!("{}://{}", &url[..scheme_end], &rest[at_pos + 1..]);
-                }
+                return format!("{}://{}", &url[..scheme_end], &rest[at_pos + 1..]);
             }
         }
         url.to_string()
@@ -145,6 +144,15 @@ mod tests {
         assert_eq!(
             AppError::redact_url("http://[::1]:9090"),
             "http://[::1]:9090"
+        );
+    }
+
+    #[test]
+    fn redact_url_strips_username_only_credentials() {
+        // 仅用户名（无密码）的凭据也应被脱敏
+        assert_eq!(
+            AppError::redact_url("http://admin@prometheus:9090"),
+            "http://prometheus:9090"
         );
     }
 }

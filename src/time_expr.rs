@@ -68,8 +68,10 @@ pub fn resolve_time_expr(expr: &str, ctx: &TimeContext) -> Result<DateTime<Utc>,
         return Ok(match dt.and_local_timezone(ctx.tz) {
             chrono::LocalResult::Single(tz_dt) => tz_dt.to_utc(),
             chrono::LocalResult::Ambiguous(earliest, _latest) => {
-                tracing::warn!(
-                    "时间「{trimmed}」在时区 {} 中有歧义（夏令时回退），使用较早的解释",
+                // 使用 eprintln! 而非 tracing::warn!，因为此函数可能在日志初始化
+                // 之前被调用（main.rs 中时间解析先于 logging::init_logging）。
+                eprintln!(
+                    "[警告] 时间「{trimmed}」在时区 {} 中有歧义（夏令时回退），使用较早的解释",
                     ctx.tz
                 );
                 earliest.to_utc()

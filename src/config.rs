@@ -335,7 +335,8 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 path: path.into(),
                 reason: format!(
                     "数据源「{}」的 url 必须以 http:// 或 https:// 开头（当前：{}）",
-                    src.name, src.url
+                    src.name,
+                    crate::error::AppError::redact_url(&src.url)
                 ),
             });
         }
