@@ -982,10 +982,28 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     reason: "database.database 不能为空".into(),
                 });
             }
+            if !is_valid_mysql_identifier(&db.database) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "database.database「{}」不是合法的 MySQL 标识符（仅允许字母/数字/下划线，不超过64字符）",
+                        db.database
+                    ),
+                });
+            }
             if db.table.is_empty() {
                 return Err(AppError::Config {
                     path: path.into(),
                     reason: "database.table 不能为空".into(),
+                });
+            }
+            if !is_valid_mysql_identifier(&db.table) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "database.table「{}」不是合法的 MySQL 标识符（仅允许字母/数字/下划线，不超过64字符）",
+                        db.table
+                    ),
                 });
             }
             if db.username.is_empty() {

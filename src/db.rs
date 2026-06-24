@@ -74,28 +74,39 @@ pub async fn push_to_database(
             ),
         })?;
 
-    // 检查/创建表
-    ensure_table(&pool, cfg, &mapped_cols).await?;
+    let result = async {
+        // 检查/创建表
+        ensure_table(&pool, cfg, &mapped_cols).await?;
 
-    // 逐行 INSERT
-    let count = insert_records(&pool, cfg, records, &mapped_cols, mapping_values, &order, tz)
-        .await?;
+        // 逐行 INSERT
+        let count = insert_records(&pool, cfg, records, &mapped_cols, mapping_values, &order, tz)
+            .await?;
 
-    info!("数据库推送完成：{count} 行写入 {db}.{table}", db = cfg.database, table = cfg.table);
+        info!("数据库推送完成：{count} 行写入 {db}.{table}", db = cfg.database, table = cfg.table);
+        Ok::<(), AppError>(())
+    }
+    .await;
 
+    // 无论成功还是失败，都优雅关闭连接池
     pool.close().await;
-    Ok(())
+    result
 }
 
 /// 构建 MySQL 连接 URL。
 fn build_mysql_url(cfg: &DatabaseConfig) -> String {
+    // IPv6 地址需用方括号包裹（RFC 3986）
+    let host_part = if cfg.host.contains(':') && !cfg.host.starts_with('[') {
+        format!("[{}]", cfg.host)
+    } else {
+        cfg.host.clone()
+    };
     format!(
         "mysql://{}:{}@{}:{}/{}",
         percent_encode(&cfg.username),
         percent_encode(&cfg.password),
-        cfg.host,
+        host_part,
         cfg.port,
-        cfg.database
+        percent_encode(&cfg.database)
     )
 }
 
@@ -117,6 +128,13 @@ fn percent_encode(s: &str) -> String {
 fn hex(n: u8) -> char {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     HEX[n as usize] as char
+}
+
+/// 检测 stdin 是否连接到终端（交互模式）。
+/// 非交互环境（CI/CD、cron、管道输入）返回 false。
+fn atty_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 /// 检查表是否存在并验证 schema；不存在则创建。
@@ -201,45 +219,51 @@ async fn ensure_table(
             extra.len(),
             extra.join(", ")
         );
-        // 交互式询问用户
-        println!(
-            "\n[提示] 表 {}.{} 中存在未配置的列：{}\n  [I] 忽略多余列，继续写入\n  [Q] 退出并生成 DDL SQL 文件\n请选择 (I/Q)：",
-            cfg.database, cfg.table, extra.join(", ")
-        );
-        let mut input = String::new();
-        std::io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| AppError::Database {
-                detail: format!("读取用户输入失败：{e}"),
-            })?;
-        match input.trim().to_uppercase().as_str() {
-            "I" => {
-                info!("用户选择忽略多余列，继续写入");
-            }
-            _ => {
-                let ddl_path = format!("{}_extra_columns.sql", cfg.table);
-                let content = format!(
-                    "-- 表 {}.{} 中存在但配置未映射的列\n-- 列名：{}\n-- 如需删除请手动执行：\n\n{}",
-                    cfg.database,
-                    cfg.table,
-                    extra.join(", "),
-                    extra
-                        .iter()
-                        .map(|col| format!(
-                            "ALTER TABLE `{}` DROP COLUMN `{}`;",
-                            cfg.table, col
-                        ))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-                std::fs::write(&ddl_path, &content).map_err(|e| AppError::Database {
-                    detail: format!("写入 DDL 文件失败：{e}"),
+        // 交互式询问用户（非交互环境默认忽略多余列并继续）
+        let is_interactive = atty_is_terminal();
+        if is_interactive {
+            println!(
+                "\n[提示] 表 {}.{} 中存在未配置的列：{}\n  [I] 忽略多余列，继续写入\n  [Q] 退出并生成 DDL SQL 文件\n请选择 (I/Q)：",
+                cfg.database, cfg.table, extra.join(", ")
+            );
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| AppError::Database {
+                    detail: format!("读取用户输入失败：{e}"),
                 })?;
-                info!("DDL 已写入 {ddl_path}，请处理后重新运行");
-                return Err(AppError::Database {
-                    detail: format!("用户选择退出，DDL 已写入 {ddl_path}"),
-                });
+            match input.trim().to_uppercase().as_str() {
+                "I" => {
+                    info!("用户选择忽略多余列，继续写入");
+                }
+                _ => {
+                    let ddl_path = format!("{}_extra_columns.sql", cfg.table);
+                    let content = format!(
+                        "-- 表 {}.{} 中存在但配置未映射的列\n-- 列名：{}\n-- 如需删除请手动执行：\n\n{}",
+                        cfg.database,
+                        cfg.table,
+                        extra.join(", "),
+                        extra
+                            .iter()
+                            .map(|col| format!(
+                                "ALTER TABLE `{}` DROP COLUMN `{}`;",
+                                cfg.table, col
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    std::fs::write(&ddl_path, &content).map_err(|e| AppError::Database {
+                        detail: format!("写入 DDL 文件失败：{e}"),
+                    })?;
+                    info!("DDL 已写入 {ddl_path}，请处理后重新运行");
+                    return Err(AppError::Database {
+                        detail: format!("用户选择退出，DDL 已写入 {ddl_path}"),
+                    });
+                }
             }
+        } else {
+            // 非交互环境（CI/CD、cron）：默认忽略多余列，继续写入
+            info!("非交互环境，自动忽略多余列，继续写入");
         }
     }
 
@@ -268,7 +292,7 @@ fn generate_create_ddl(cfg: &DatabaseConfig, mapped_cols: &[(&str, &str, &str)])
     let mut lines = Vec::new();
     for (local_name, db_name, comment) in mapped_cols {
         let sql_type = infer_sql_type(local_name);
-        let comment_escaped = comment.replace('\'', "''");
+        let comment_escaped = comment.replace('\\', "\\\\").replace('\'', "''");
         lines.push(format!(
             "  `{db_name}` {sql_type} COMMENT '{comment_escaped}'"
         ));
@@ -290,7 +314,7 @@ fn generate_alter_ddl(
     for (local_name, db_name, comment) in mapped_cols {
         if missing.contains(db_name) {
             let sql_type = infer_sql_type(local_name);
-            let comment_escaped = comment.replace('\'', "''");
+            let comment_escaped = comment.replace('\\', "\\\\").replace('\'', "''");
             lines.push(format!(
                 "ADD COLUMN `{db_name}` {sql_type} COMMENT '{comment_escaped}'"
             ));
