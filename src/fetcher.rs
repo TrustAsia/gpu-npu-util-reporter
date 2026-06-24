@@ -143,7 +143,10 @@ impl MetricFetcher for PrometheusFetcher {
             let seg_end = if i == num_segments - 1 {
                 end
             } else {
-                (seg_start + Duration::seconds(segment_secs)).min(end)
+                seg_start
+                    .checked_add_signed(Duration::seconds(segment_secs))
+                    .unwrap_or(end)
+                    .min(end)
             };
             match self.query_range_single(promql, seg_start, seg_end, step).await {
                 Ok(segments) => {

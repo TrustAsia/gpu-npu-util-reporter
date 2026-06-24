@@ -33,8 +33,8 @@ pub struct LabelMapping {
 ///
 /// serde 表示采用 `#[serde(untagged)]` + newtype 包装，使 YAML 形如
 /// `composite_ratio: { used, free }` / `direct_metric: { metric, fallback }` /
-/// `composite_from_total: { used, total }`（外部命名的单键 map），兼容 `serde_yaml`
-/// 对带字段变体的限制（`serde_yaml` 不支持默认的 externally-tagged 字段变体）。
+/// `composite_from_total: { used, total }`（外部命名的单键 map），兼容 `serde_yaml_ng`
+/// 对带字段变体的限制（`serde_yaml_ng` 不支持默认的 externally-tagged 字段变体）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum MemoryStrategy {
@@ -250,8 +250,8 @@ mod tests {
     #[test]
     fn device_spec_round_trips_through_yaml() {
         let s = ascend_910b_spec();
-        let yaml = serde_yaml::to_string(&s).unwrap();
-        let back: DeviceSpec = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml_ng::to_string(&s).unwrap();
+        let back: DeviceSpec = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(s, back);
     }
 
@@ -267,7 +267,7 @@ composite_ratio:
 direct_metric:
   metric: "metric_c"
 "#;
-        let result: Result<MemoryStrategy, _> = serde_yaml::from_str(yaml);
+        let result: Result<MemoryStrategy, _> = serde_yaml_ng::from_str(yaml);
         assert!(
             result.is_err(),
             "含糊的 YAML（同时含多个变体键）应被拒绝，而非静默匹配"

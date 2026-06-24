@@ -256,9 +256,9 @@ report:
 }
 
 /// 带 `DeviceSpec` 序列化后按 `level` 层（每层 2 空格）缩进，嵌入到 `key:` 下方。
-/// `serde_yaml` 顶层可能带一个 `---` 文档标记，需去掉。
+/// `serde_yaml_ng` 顶层可能带一个 `---` 文档标记，需去掉。
 fn indent_device(level: usize, spec: &DeviceSpec) -> String {
-    let yaml = serde_yaml::to_string(spec).unwrap_or_default();
+    let yaml = serde_yaml_ng::to_string(spec).unwrap_or_default();
     let pad = " ".repeat(level * 2);
     yaml.lines()
         .filter(|l| !l.trim_start().starts_with("---"))
@@ -284,7 +284,7 @@ pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
         path: path.into(),
         reason: format!("读取失败：{e}"),
     })?;
-    let cfg: AppConfig = serde_yaml::from_str(&content).map_err(|e| AppError::Config {
+    let cfg: AppConfig = serde_yaml_ng::from_str(&content).map_err(|e| AppError::Config {
         path: path.into(),
         reason: format!("{e}"),
     })?;
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn default_yaml_round_trips() {
         let yaml = default_config_yaml();
-        let cfg: AppConfig = serde_yaml::from_str(&yaml).expect("默认 YAML 必须可解析");
+        let cfg: AppConfig = serde_yaml_ng::from_str(&yaml).expect("默认 YAML 必须可解析");
         assert_eq!(cfg.devices.get("nvidia_a10").unwrap().card_id_label, "gpu");
         assert_eq!(cfg.devices.get("ascend_910b").unwrap().card_id_label, "id");
         assert!(cfg.thresholds.core_avg_above.is_none()); // 默认模板里 thresholds 全为 null
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn apply_overrides_requires_both_start_and_end() {
-        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         let r = apply_overrides(
             cfg,
             &CliOverrides {
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn apply_overrides_accepts_valid_times() {
-        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         let out = apply_overrides(
             cfg,
             &CliOverrides {
@@ -686,14 +686,14 @@ mod tests {
 
     #[test]
     fn config_rejects_zero_query_step() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.report.query_step_secs = 0;
         assert!(validate_config(&cfg, "test.yaml").is_err());
     }
 
     #[test]
     fn config_rejects_start_ge_end() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.time_range.start = "2026-06-19 00:00:00".into();
         cfg.time_range.end = "2026-06-18 00:00:00".into();
         assert!(validate_config(&cfg, "test.yaml").is_err());
@@ -701,14 +701,14 @@ mod tests {
 
     #[test]
     fn config_accepts_valid_time_range() {
-        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         assert!(validate_config(&cfg, "test.yaml").is_ok());
     }
 
     #[test]
     fn apply_overrides_accepts_absolute_and_relative_times() {
         // 绝对时间
-        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         let out = apply_overrides(
             cfg,
             &CliOverrides {
@@ -722,7 +722,7 @@ mod tests {
         assert_eq!(out.time_range.start, "2026-01-01 00:00:00");
 
         // 相对时间表达式
-        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         let out = apply_overrides(
             cfg,
             &CliOverrides {
@@ -739,28 +739,28 @@ mod tests {
 
     #[test]
     fn config_rejects_zero_timeout() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.sources[0].timeout_secs = 0;
         assert!(validate_config(&cfg, "test.yaml").is_err(), "timeout_secs=0 应被拒绝");
     }
 
     #[test]
     fn config_rejects_oversized_query_step() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.report.query_step_secs = u64::MAX;
         assert!(validate_config(&cfg, "test.yaml").is_err(), "超大 query_step_secs 应被拒绝");
     }
 
     #[test]
     fn config_rejects_empty_sources() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.sources.clear();
         assert!(validate_config(&cfg, "test.yaml").is_err(), "空 sources 应被拒绝");
     }
 
     #[test]
     fn config_rejects_url_without_scheme() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.sources[0].url = "192.168.1.100:9090".into();
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "无协议前缀的 URL 应被拒绝");
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_metric_name() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         // 注入含 PromQL 特殊字符的指标名
         cfg.devices
             .get_mut("nvidia_a10")
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_label_name() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.devices
             .get_mut("nvidia_a10")
             .unwrap()
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn config_rejects_undefined_device_type() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.sources[0].device_types.push("nonexistent_device".into());
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "引用未定义的设备类型应被拒绝");
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn config_accepts_valid_metric_and_label_names() {
         // 默认配置的指标名/标签名都应通过校验
-        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         assert!(validate_config(&cfg, "test.yaml").is_ok());
     }
 
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn config_rejects_mapping_with_unknown_record_key() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.mapping = Some(crate::mapper::MappingConfig {
             enabled: true,
             sources: vec![crate::mapper::MappingSource {
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn config_rejects_mapping_with_empty_match_keys() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.mapping = Some(crate::mapper::MappingConfig {
             enabled: true,
             sources: vec![crate::mapper::MappingSource {
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn config_accepts_mapping_with_known_record_key() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.mapping = Some(crate::mapper::MappingConfig {
             enabled: true,
             sources: vec![crate::mapper::MappingSource {
@@ -888,14 +888,14 @@ mod tests {
 
     #[test]
     fn config_accepts_valid_timezone() {
-        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         assert_eq!(cfg.timezone, "Asia/Shanghai");
         assert!(validate_config(&cfg, "test.yaml").is_ok());
     }
 
     #[test]
     fn config_rejects_invalid_timezone() {
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.timezone = "Invalid/Zone".into();
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "非法时区名应被拒绝");
@@ -921,7 +921,7 @@ mod tests {
                 },
             });
         }
-        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.devices.get_mut("nvidia_a10").unwrap().memory = inner;
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "超过 10 层的 fallback 嵌套应被拒绝");

@@ -62,17 +62,27 @@ pub fn resolve_time_expr(expr: &str, ctx: &TimeContext) -> Result<DateTime<Utc>,
     let trimmed = expr.trim();
 
     // 先尝试绝对时间：按配置时区解释后转为 UTC
+    // 夏令时回退期间同一本地时间可能出现两次（歧义），选择较早的解释并记日志；
+    // 春季前进跳变期间本地时间不存在，硬性拒绝。
     if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
-        return Ok(dt
-            .and_local_timezone(ctx.tz)
-            .single()
-            .ok_or_else(|| AppError::TimeFormat {
-                raw: format!(
-                    "「{trimmed}」在时区 {} 中无效（夏令时歧义或不存在）",
+        return Ok(match dt.and_local_timezone(ctx.tz) {
+            chrono::LocalResult::Single(tz_dt) => tz_dt.to_utc(),
+            chrono::LocalResult::Ambiguous(earliest, _latest) => {
+                tracing::warn!(
+                    "时间「{trimmed}」在时区 {} 中有歧义（夏令时回退），使用较早的解释",
                     ctx.tz
-                ),
-            })?
-            .to_utc());
+                );
+                earliest.to_utc()
+            }
+            chrono::LocalResult::None => {
+                return Err(AppError::TimeFormat {
+                    raw: format!(
+                        "「{trimmed}」在时区 {} 中不存在（夏令时前进跳变）",
+                        ctx.tz
+                    ),
+                })
+            }
+        });
     }
 
     // 相对时间：解析 anchor

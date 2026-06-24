@@ -50,7 +50,7 @@ pub const BASE_COLUMNS: &[&str] = &[
 /// 列插入位置：相对于某锚点列的前/后。
 ///
 /// serde 表示为一个对象 `{ direction: before|after, anchor: <列名> }`，
-/// 而非外部标记枚举——因为 `serde_yaml` 不支持默认的 externally-tagged 变体。
+/// 而非外部标记枚举——因为 `serde_yaml_ng` 不支持默认的 externally-tagged 变体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct InsertPosition {

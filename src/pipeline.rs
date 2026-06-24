@@ -680,7 +680,7 @@ mod tests {
 
     fn cfg_with_mode(mode: &str) -> AppConfig {
         let mut cfg =
-            serde_yaml::from_str::<AppConfig>(&crate::config::default_config_yaml()).unwrap();
+            serde_yaml_ng::from_str::<AppConfig>(&crate::config::default_config_yaml()).unwrap();
         cfg.ownership.mode = mode.into();
         cfg
     }
