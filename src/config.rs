@@ -486,11 +486,31 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
 }
 
 /// 校验显存策略中所有指标名的合法性（递归，因 fallback 嵌套）。
+/// 同时校验 fallback 嵌套深度不超过 [`MAX_FALLBACK_DEPTH`]，防止栈溢出。
+const MAX_FALLBACK_DEPTH: usize = 10;
+
 fn validate_memory_metrics(
     strategy: &crate::devices::MemoryStrategy,
     device_key: &str,
     path: &str,
 ) -> Result<(), AppError> {
+    validate_memory_metrics_inner(strategy, device_key, path, 0)
+}
+
+fn validate_memory_metrics_inner(
+    strategy: &crate::devices::MemoryStrategy,
+    device_key: &str,
+    path: &str,
+    depth: usize,
+) -> Result<(), AppError> {
+    if depth > MAX_FALLBACK_DEPTH {
+        return Err(AppError::Config {
+            path: path.into(),
+            reason: format!(
+                "devices.{device_key}.memory fallback 嵌套深度超过 {MAX_FALLBACK_DEPTH} 层，请检查配置"
+            ),
+        });
+    }
     match strategy {
         crate::devices::MemoryStrategy::CompositeRatio(b) => {
             for name in [&b.composite_ratio.used, &b.composite_ratio.free] {
@@ -515,7 +535,7 @@ fn validate_memory_metrics(
                 });
             }
             if let Some(fb) = &b.direct_metric.fallback {
-                validate_memory_metrics(fb, device_key, path)?;
+                validate_memory_metrics_inner(fb, device_key, path, depth + 1)?;
             }
         }
         crate::devices::MemoryStrategy::CompositeFromTotal(b) => {
@@ -879,5 +899,33 @@ mod tests {
         cfg.timezone = "Invalid/Zone".into();
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "非法时区名应被拒绝");
+    }
+
+    #[test]
+    fn config_rejects_deeply_nested_fallback() {
+        // 构造超过 MAX_FALLBACK_DEPTH(10) 层的 DirectMetric 嵌套链
+        use crate::devices::{DirectInner, DirectMetricBody, MemoryStrategy};
+        let mut inner = MemoryStrategy::CompositeFromTotal(
+            crate::devices::CompositeFromTotalBody {
+                composite_from_total: crate::devices::UsedTotal {
+                    used: "bottom_used".into(),
+                    total: "bottom_total".into(),
+                },
+            },
+        );
+        for _ in 0..11 {
+            inner = MemoryStrategy::DirectMetric(DirectMetricBody {
+                direct_metric: DirectInner {
+                    metric: "deep_metric".into(),
+                    fallback: Some(Box::new(inner)),
+                },
+            });
+        }
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices.get_mut("nvidia_a10").unwrap().memory = inner;
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "超过 10 层的 fallback 嵌套应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("fallback") || msg.contains("嵌套"), "错误信息应提及 fallback 嵌套");
     }
 }

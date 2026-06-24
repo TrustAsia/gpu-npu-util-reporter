@@ -271,6 +271,9 @@ pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Ve
     result
 }
 
+/// 资产表行数上限，防止异常大的资产文件耗尽内存。
+const MAX_ASSET_ROWS: usize = 1_000_000;
+
 /// 加载资产表，并为每行注入 `@key`（由 `match_keys` 指定的列拼成）。
 /// 按扩展名分流：`.csv` 用 csv crate，`.xlsx`/`.xls`/`.xlsb`/`.ods` 用 calamine 自动检测。
 /// 首行视为表头。
@@ -336,6 +339,12 @@ fn load_csv(path: &str, match_keys: &str) -> Result<Vec<AssetRow>, AppError> {
     validate_match_key_in_headers(&headers, match_keys, path)?;
     let mut rows = Vec::new();
     for rec in rdr.records() {
+        if rows.len() >= MAX_ASSET_ROWS {
+            return Err(AppError::Mapping {
+                path: path.into(),
+                detail: format!("资产表行数超过 {MAX_ASSET_ROWS} 行上限"),
+            });
+        }
         let rec = rec.map_err(|e| AppError::Mapping {
             path: path.into(),
             detail: format!("解析行失败：{e}"),
@@ -393,6 +402,12 @@ fn load_excel(path: &str, match_keys: &str, sheet: Option<&str>) -> Result<Vec<A
     validate_match_key_in_headers(&headers, match_keys, path)?;
     let mut rows = Vec::new();
     for row in iter {
+        if rows.len() >= MAX_ASSET_ROWS {
+            return Err(AppError::Mapping {
+                path: path.into(),
+                detail: format!("资产表行数超过 {MAX_ASSET_ROWS} 行上限"),
+            });
+        }
         let mut m = HashMap::new();
         for (i, cell) in row.iter().enumerate() {
             if let Some(h) = headers.get(i) {

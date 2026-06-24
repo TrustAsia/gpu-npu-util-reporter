@@ -33,6 +33,8 @@ pub trait MetricFetcher: Send + Sync {
 pub struct PrometheusFetcher {
     client: reqwest::Client,
     base_url: String,
+    /// 脱敏后的 URL（仅用于错误消息，避免日志泄露凭据）。
+    redacted_url: String,
     timeout: std::time::Duration,
     /// 用于错误提示的数据源别名。
     source_name: String,
@@ -44,12 +46,21 @@ const MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
 impl PrometheusFetcher {
     #[must_use]
     pub fn new(source_name: String, base_url: String, timeout_secs: u64) -> Self {
+        let redacted_url = crate::error::AppError::redact_url(&base_url);
+        let client = reqwest::ClientBuilder::new()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build();
+        let client = match client {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("HTTP 客户端构建失败（{e}），使用默认配置");
+                reqwest::Client::new()
+            }
+        };
         Self {
-            client: reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
-                .unwrap_or_default(),
+            client,
             base_url,
+            redacted_url,
             timeout: std::time::Duration::from_secs(timeout_secs),
             source_name,
         }
@@ -159,7 +170,7 @@ impl MetricFetcher for PrometheusFetcher {
             // 部分时间范围的数据可能导致误导性的均值/峰值统计。
             return Err(AppError::Prometheus {
                 source_name: self.source_name.clone(),
-                url: self.base_url.clone(),
+                url: self.redacted_url.clone(),
                 detail: "分段查询部分失败，数据可能不完整".into(),
             });
         }
@@ -177,16 +188,16 @@ impl MetricFetcher for PrometheusFetcher {
             .await
             .map_err(|e| AppError::Prometheus {
                 source_name: self.source_name.clone(),
-                url: self.base_url.clone(),
+                url: self.redacted_url.clone(),
                 detail: format!("连接失败：{e}"),
             })?;
         let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
             source_name: self.source_name.clone(),
-            url: self.base_url.clone(),
+            url: self.redacted_url.clone(),
             detail: format!("HTTP 请求失败：{e}"),
         })?;
         let data: PromResponse =
-            read_limited_json(resp, &self.source_name, &self.base_url).await?;
+            read_limited_json(resp, &self.source_name, &self.redacted_url).await?;
         parse_response(data, &self.source_name)
     }
 }
@@ -215,16 +226,16 @@ impl PrometheusFetcher {
             .await
             .map_err(|e| AppError::Prometheus {
                 source_name: self.source_name.clone(),
-                url: self.base_url.clone(),
+                url: self.redacted_url.clone(),
                 detail: format!("连接失败：{e}"),
             })?;
         let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
             source_name: self.source_name.clone(),
-            url: self.base_url.clone(),
+            url: self.redacted_url.clone(),
             detail: format!("HTTP 请求失败：{e}"),
         })?;
         let data: PromResponse =
-            read_limited_json(resp, &self.source_name, &self.base_url).await?;
+            read_limited_json(resp, &self.source_name, &self.redacted_url).await?;
         parse_response(data, &self.source_name)
     }
 }

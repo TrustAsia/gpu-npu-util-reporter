@@ -17,6 +17,7 @@ pub enum AppError {
     Config { path: String, reason: String },
 
     /// 无法连接到 Prometheus（网络层）。
+    /// URL 中的凭据（user:pass@）已在构造时脱敏，避免日志泄露。
     #[error(
         "[错误] 无法连接到 Prometheus 数据源 {source_name}（{url}），请检查网络或配置：{detail}"
     )]
@@ -63,6 +64,25 @@ impl AppError {
     pub const fn is_warning(&self) -> bool {
         matches!(self, Self::Warning { .. })
     }
+
+    /// 对 URL 中的凭据做脱敏处理：移除 `user:pass@` 部分。
+    ///
+    /// 防止日志中泄露嵌入在 URL 中的用户名/密码
+    /// （如 `http://user:pass@prometheus:9090` → `http://prometheus:9090`）。
+    pub fn redact_url(url: &str) -> String {
+        // 查找 :// 后的 user:pass@ 部分
+        if let Some(scheme_end) = url.find("://") {
+            let rest = &url[scheme_end + 3..];
+            if let Some(at_pos) = rest.find('@') {
+                let before_at = &rest[..at_pos];
+                // 仅当 @ 之前含 :（user:pass 格式）时才脱敏，避免误处理 IPv6 地址
+                if before_at.contains(':') {
+                    return format!("{}://{}", &url[..scheme_end], &rest[at_pos + 1..]);
+                }
+            }
+        }
+        url.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -93,5 +113,38 @@ mod tests {
     fn fatal_errors_are_not_warnings() {
         let e = AppError::TimeFormat { raw: "x".into() };
         assert!(!e.is_warning());
+    }
+
+    #[test]
+    fn redact_url_strips_credentials() {
+        assert_eq!(
+            AppError::redact_url("http://user:pass@prometheus:9090"),
+            "http://prometheus:9090"
+        );
+    }
+
+    #[test]
+    fn redact_url_preserves_url_without_credentials() {
+        assert_eq!(
+            AppError::redact_url("http://192.168.1.100:9090"),
+            "http://192.168.1.100:9090"
+        );
+    }
+
+    #[test]
+    fn redact_url_preserves_https() {
+        assert_eq!(
+            AppError::redact_url("https://user:secret@prometheus.example.com/prom"),
+            "https://prometheus.example.com/prom"
+        );
+    }
+
+    #[test]
+    fn redact_url_preserves_ipv6_without_credentials() {
+        // IPv6 地址含冒号但无 @，不应被误脱敏
+        assert_eq!(
+            AppError::redact_url("http://[::1]:9090"),
+            "http://[::1]:9090"
+        );
     }
 }
