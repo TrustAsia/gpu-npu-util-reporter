@@ -548,8 +548,9 @@ async fn query_with_ip_fallback(
             // 含特殊字符的标签值。IPv6 方括号需单独处理。
             let ip_regex_escaped = escape_promql_regex(host_ip);
             let ip_regex = if host_ip.contains(':') {
-                // IPv6：instance 为 [ip]:port，正则需匹配方括号
-                format!(r"^\[{ip_regex_escaped}\]:")
+                // IPv6：instance 为 [ip]:port，正则需匹配字面方括号。
+                // Go 字符串字面量中 \\[ 解析为 \[，RE2 匹配字面 [。
+                format!("^\\[{ip_regex_escaped}\\]:")
             } else {
                 format!("^{ip_regex_escaped}:")
             };
@@ -744,16 +745,32 @@ fn strip_port(s: &str) -> String {
 ///
 /// 转义所有正则元字符，使字符串在 `=~` 匹配中被当作字面量。
 /// Prometheus 使用 RE2 引擎，元字符为：`\ . ^ $ * + ? ( ) [ ] { } |`
+/// 对 `PromQL` 正则匹配（`=~"..."`）中的标签值做 RE2 转义。
+///
+/// PromQL 标签值使用 Go 双引号字符串字面量语法，Go 会先解析一层转义
+/// （如 `\\.` → `\.`），再交给 RE2 引擎。因此要在 RE2 中匹配字面量 `.`，
+/// 需要正则 `\.`，对应 Go 字符串 `\\.`——即本函数输出的**双反斜杠**形式。
+///
+/// 例如 `"192.168.1.1"` → `"192\\.168\\.1\\.1"`，嵌入 `instance=~"…"` 后
+/// Go 解析为 `192\.168\.1\.1`，RE2 匹配字面量 IP。
 pub fn escape_promql_regex(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len() * 2);
     for c in s.chars() {
         if matches!(
             c,
             '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
         ) {
-            out.push('\\');
+            // 双反斜杠：Go 字符串字面量解析一层后留给 RE2 一个反斜杠。
+            // 反斜杠自身需要四重反斜杠：Go 解析 \\\\→\\，RE2 将 \\ 视为字面 \。
+            if c == '\\' {
+                out.push_str("\\\\\\\\");
+            } else {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+        } else {
+            out.push(c);
         }
-        out.push(c);
     }
     out
 }
@@ -1594,13 +1611,14 @@ mod tests {
 
     #[test]
     fn escape_promql_regex_escapes_metacharacters() {
-        assert_eq!(escape_promql_regex("1.1.1.1"), r"1\.1\.1\.1");
-        assert_eq!(escape_promql_regex("a*b+c?"), r"a\*b\+c\?");
+        // 双反斜杠：Go 字符串字面量解析一层后留给 RE2 一个反斜杠。
+        assert_eq!(escape_promql_regex("1.1.1.1"), r"1\\.1\\.1\\.1");
+        assert_eq!(escape_promql_regex("a*b+c?"), r"a\\*b\\+c\\?");
         assert_eq!(escape_promql_regex("normal"), "normal");
-        assert_eq!(escape_promql_regex(r"a\b"), r"a\\b");
-        assert_eq!(escape_promql_regex("[test]"), r"\[test\]");
-        assert_eq!(escape_promql_regex("{val}"), r"\{val\}");
-        assert_eq!(escape_promql_regex("a|b"), r"a\|b");
-        assert_eq!(escape_promql_regex("^start$"), r"\^start\$");
+        assert_eq!(escape_promql_regex(r"a\b"), r"a\\\\b");
+        assert_eq!(escape_promql_regex("[test]"), r"\\[test\\]");
+        assert_eq!(escape_promql_regex("{val}"), r"\\{val\\}");
+        assert_eq!(escape_promql_regex("a|b"), r"a\\|b");
+        assert_eq!(escape_promql_regex("^start$"), r"\\^start\\$");
     }
 }

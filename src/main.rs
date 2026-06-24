@@ -249,9 +249,11 @@ async fn main() -> ExitCode {
                     // 精确匹配主机 IP，避免前缀碰撞（如 "192.168.1.10" 不应匹配 "192.168.1.100"）。
                     // host_label 值可能为裸 IP 或 "ip:port" 格式，用 ($|:) 精确锚定边界。
                     let ip_regex = if ip.contains(':') {
-                        format!(r"^\[{}\]($|:)", escaped_ip)
+                        // IPv6：host_label 值可能为 [ip]:port，正则需匹配字面方括号。
+                        // Go 字符串字面量中 \\[ 解析为 \[，RE2 匹配字面 [。
+                        format!("^\\[{escaped_ip}\\]($|:)")
                     } else {
-                        format!(r"^{}($|:)", escaped_ip)
+                        format!("^{escaped_ip}($|:)")
                     };
                     let label_filter = format!("{}=~\"{}\"", hm.host_label, ip_regex);
 
