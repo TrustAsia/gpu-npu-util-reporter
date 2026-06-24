@@ -35,6 +35,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       - name: Install musl-tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -68,6 +73,10 @@ jobs:
       - name: Test
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: cargo test --target ${{ matrix.target }}
+
+      - name: Compile tests (cross-compiled)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo test --target ${{ matrix.target }} --no-run
 
       - name: Rename binary for release
         shell: bash
@@ -153,6 +162,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       - name: Install cargo-zigbuild
         run: pip3 install cargo-zigbuild
 
@@ -160,12 +174,18 @@ jobs:
         run: |
           curl -L -o MacOSX14.5.sdk.tar.xz \
             https://github.com/joseluisq/macosx-sdks/releases/download/14.5/MacOSX14.5.sdk.tar.xz
+          echo "6e146275d19f027faa2e8354da5e0267513abf013b8f16ad65a231653a2b1c5d  MacOSX14.5.sdk.tar.xz" | sha256sum -c
           tar -xf MacOSX14.5.sdk.tar.xz
 
       - name: Build
         env:
           SDKROOT: ${{ github.workspace }}/MacOSX14.5.sdk
         run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Compile tests
+        env:
+          SDKROOT: ${{ github.workspace }}/MacOSX14.5.sdk
+        run: cargo zigbuild --release --target ${{ matrix.target }} --no-run
 
       - name: Read version
         id: version
@@ -191,6 +211,7 @@ jobs:
     needs: [build-native, build-darwin]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    concurrency: release-${{ github.ref }}
     permissions:
       contents: write
 

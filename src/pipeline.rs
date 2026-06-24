@@ -1460,4 +1460,16 @@ mod tests {
             r#"path\\file\nend"#
         );
     }
+
+    #[test]
+    fn escape_promql_regex_escapes_metacharacters() {
+        assert_eq!(escape_promql_regex("1.1.1.1"), r"1\.1\.1\.1");
+        assert_eq!(escape_promql_regex("a*b+c?"), r"a\*b\+c\?");
+        assert_eq!(escape_promql_regex("normal"), "normal");
+        assert_eq!(escape_promql_regex(r"a\b"), r"a\\b");
+        assert_eq!(escape_promql_regex("[test]"), r"\[test\]");
+        assert_eq!(escape_promql_regex("{val}"), r"\{val\}");
+        assert_eq!(escape_promql_regex("a|b"), r"a\|b");
+        assert_eq!(escape_promql_regex("^start$"), r"\^start\$");
+    }
 }

@@ -132,4 +132,21 @@ fn renders_report_with_mapping_columns() {
         "列数应为基础列 + 1 映射列"
     );
     assert_eq!(range.height(), 2, "1 表头 + 1 数据行");
+
+    // 验证映射列内容：找到"机房"列，确认数据行值为"北京A区"
+    let machine_room_col = (0..range.width())
+        .find(|&c| {
+            range
+                .get((0, c))
+                .map_or(false, |v| v.to_string() == "机房")
+        })
+        .expect("should find machine room column");
+    let cell = range
+        .get((1, machine_room_col))
+        .expect("data row should have machine room cell");
+    assert_eq!(
+        cell.to_string(),
+        "北京A区",
+        "映射列应写入正确的资产值"
+    );
 }

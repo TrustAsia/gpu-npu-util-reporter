@@ -99,7 +99,7 @@ pub fn render_to_buffer<S: BuildHasher>(
     // HexColor 已在反序列化/parse 阶段校验为 #RRGGBB（大写），此处解析必然成功；
     // 若因代码 bug 导致意外值，用 match 显式回退到红色（而非静默变黑）。
     let pct_color = |hex: &HexColor| -> Format {
-        let rgb = u32::from_str_radix(&hex.value()[1..], 16).unwrap_or(0x00FF_0000);
+        let rgb = u32::from_str_radix(&hex.value()[1..], 16).unwrap_or(0xFF0000);
         Format::new()
             .set_background_color(Color::RGB(rgb))
             .set_num_format("0.00%")

@@ -77,20 +77,26 @@ async fn main() -> ExitCode {
     // 2. 解析时间范围（支持相对时间表达式）
     //    两遍解析：先解析不含 start/end 依赖的表达式（如 now-7d），
     //    再用已解析的 start/end 解析依赖它们的表达式（如 end-1d）。
+    //    注意：时区需在此前解析，因为绝对时间（如 "00:00:01"）
+    //    需按配置时区解释为本地时间后转 UTC。
     let now = Utc::now();
+    let tz: chrono_tz::Tz = cfg.timezone.parse().unwrap_or_else(|_| {
+        error!("时区「{}」无效，使用默认 Asia/Shanghai", cfg.timezone);
+        "Asia/Shanghai".parse().unwrap()
+    });
     // 第一遍：尝试解析 start（仅 now 上下文）
-    let start = if let Ok(t) = resolve_time(&cfg.time_range.start, now, None, None) {
+    let start = if let Ok(t) = resolve_time(&cfg.time_range.start, now, None, None, tz) {
         t
     } else {
         // start 可能引用 end（如 "end-1d"），先解析 end 再重试
-        let end = match resolve_time(&cfg.time_range.end, now, None, None) {
+        let end = match resolve_time(&cfg.time_range.end, now, None, None, tz) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("{e}");
                 return ExitCode::from(1);
             }
         };
-        match resolve_time(&cfg.time_range.start, now, None, Some(end)) {
+        match resolve_time(&cfg.time_range.start, now, None, Some(end), tz) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("{e}");
@@ -99,7 +105,7 @@ async fn main() -> ExitCode {
         }
     };
     // 第二遍：用已解析的 start 解析 end
-    let end = match resolve_time(&cfg.time_range.end, now, Some(start), None) {
+    let end = match resolve_time(&cfg.time_range.end, now, Some(start), None, tz) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -112,10 +118,6 @@ async fn main() -> ExitCode {
     }
 
     // 3. 渲染模板变量（路径中的 {{start}}, {{end}}, {{now}} 等）
-    let tz: chrono_tz::Tz = cfg.timezone.parse().unwrap_or_else(|_| {
-        error!("时区「{}」无效，使用默认 Asia/Shanghai", cfg.timezone);
-        "Asia/Shanghai".parse().unwrap()
-    });
     let tpl_ctx = template::TemplateContext {
         start,
         end,
@@ -302,7 +304,8 @@ fn resolve_time(
     now: DateTime<Utc>,
     start: Option<DateTime<Utc>>,
     end: Option<DateTime<Utc>>,
+    tz: chrono_tz::Tz,
 ) -> Result<DateTime<Utc>, AppError> {
-    let ctx = time_expr::TimeContext { now, start, end };
+    let ctx = time_expr::TimeContext { now, start, end, tz };
     time_expr::resolve_time_expr(s, &ctx)
 }

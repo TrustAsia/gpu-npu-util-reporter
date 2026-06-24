@@ -21,8 +21,9 @@
 
 use crate::error::AppError;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use chrono_tz::Tz;
 
-/// 相对时间解析的上下文：提供 `now`、`start`、`end` 三个锚点。
+/// 相对时间解析的上下文：提供 `now`、`start`、`end` 三个锚点及显示时区。
 #[derive(Debug, Clone)]
 pub struct TimeContext {
     /// 当前时刻。
@@ -31,6 +32,9 @@ pub struct TimeContext {
     pub start: Option<DateTime<Utc>>,
     /// 查询时间范围终点。
     pub end: Option<DateTime<Utc>>,
+    /// 显示时区：绝对时间字符串按此时区解释后转为 UTC。
+    /// 相对时间（如 `now-7d`）不受此时区影响——`now` 始终取 UTC 当前时刻。
+    pub tz: Tz,
 }
 
 impl Default for TimeContext {
@@ -39,13 +43,16 @@ impl Default for TimeContext {
             now: Utc::now(),
             start: None,
             end: None,
+            tz: "UTC".parse().unwrap(),
         }
     }
 }
 
-/// 解析时间表达式，返回绝对时间。
+/// 解析时间表达式，返回绝对时间（UTC）。
 ///
-/// 如果输入是标准的绝对时间格式（`YYYY-MM-DD HH:MM:SS`），直接解析返回。
+/// 如果输入是标准的绝对时间格式（`YYYY-MM-DD HH:MM:SS`），按配置时区解释后
+/// 转为 UTC 返回（如用户在 `Asia/Shanghai` 下写 `00:00:01`，会被解释为
+/// 上海时间零点，转为 UTC `16:00:01`）。
 /// 如果是相对时间表达式（如 `now-7d`），基于 `ctx` 计算后返回。
 ///
 /// # Errors
@@ -54,9 +61,18 @@ impl Default for TimeContext {
 pub fn resolve_time_expr(expr: &str, ctx: &TimeContext) -> Result<DateTime<Utc>, AppError> {
     let trimmed = expr.trim();
 
-    // 先尝试绝对时间
+    // 先尝试绝对时间：按配置时区解释后转为 UTC
     if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
-        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        return Ok(dt
+            .and_local_timezone(ctx.tz)
+            .single()
+            .ok_or_else(|| AppError::TimeFormat {
+                raw: format!(
+                    "「{trimmed}」在时区 {} 中无效（夏令时歧义或不存在）",
+                    ctx.tz
+                ),
+            })?
+            .to_utc());
     }
 
     // 相对时间：解析 anchor
@@ -223,6 +239,7 @@ mod tests {
             now: Utc.timestamp_opt(1_719_200_000, 0).unwrap(), // 2024-06-24 08:53:20 UTC
             start: Some(Utc.timestamp_opt(1_719_158_400, 0).unwrap()), // 2024-06-23 21:00:00
             end: Some(Utc.timestamp_opt(1_719_244_800, 0).unwrap()),   // 2024-06-24 21:00:00
+            tz: "UTC".parse().unwrap(),
         }
     }
 
@@ -277,6 +294,7 @@ mod tests {
             now: Utc::now(),
             start: None,
             end: None,
+            tz: "UTC".parse().unwrap(),
         };
         let result = resolve_time_expr("start+1h", &ctx);
         assert!(result.is_err());
@@ -324,5 +342,37 @@ mod tests {
         assert!(resolve_time_expr("now-1h", &ctx).is_ok());
         assert!(resolve_time_expr("now-1m", &ctx).is_ok());
         assert!(resolve_time_expr("now-1s", &ctx).is_ok());
+    }
+
+    #[test]
+    fn absolute_time_interpreted_in_configured_timezone() {
+        // 用户在 Asia/Shanghai 配置下写 "2026-06-18 00:00:01"，
+        // 应被解释为上海时间零点，转为 UTC 后应为 2026-06-17 16:00:01。
+        let ctx_shanghai = TimeContext {
+            now: Utc::now(),
+            start: None,
+            end: None,
+            tz: "Asia/Shanghai".parse().unwrap(),
+        };
+        let result = resolve_time_expr("2026-06-18 00:00:01", &ctx_shanghai).unwrap();
+        assert_eq!(
+            result.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-06-17 16:00:01",
+            "Asia/Shanghai 下的 00:00:01 应转为 UTC 16:00:01"
+        );
+
+        // UTC 时区下，绝对时间应原样解释
+        let ctx_utc = TimeContext {
+            now: Utc::now(),
+            start: None,
+            end: None,
+            tz: "UTC".parse().unwrap(),
+        };
+        let result_utc = resolve_time_expr("2026-06-18 00:00:01", &ctx_utc).unwrap();
+        assert_eq!(
+            result_utc.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-06-18 00:00:01",
+            "UTC 下的绝对时间应原样解释"
+        );
     }
 }
