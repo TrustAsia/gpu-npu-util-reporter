@@ -631,6 +631,18 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
         });
     }
     for src in &cfg.sources {
+        if src.name.is_empty() {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: "sources[].name 不能为空".into(),
+            });
+        }
+        if src.device_types.is_empty() {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!("数据源「{}」的 device_types 不能为空", src.name),
+            });
+        }
         if !src.url.starts_with("http://") && !src.url.starts_with("https://") {
             return Err(AppError::Config {
                 path: path.into(),
@@ -1138,6 +1150,26 @@ mod tests {
             validate_config(&cfg, "test.yaml").is_err(),
             "空 sources 应被拒绝"
         );
+    }
+
+    #[test]
+    fn config_rejects_empty_source_name() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].name.clear();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 source name 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("name"), "错误消息应提及 name");
+    }
+
+    #[test]
+    fn config_rejects_empty_device_types() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].device_types.clear();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 device_types 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("device_types"), "错误消息应提及 device_types");
     }
 
     #[test]

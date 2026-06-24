@@ -173,7 +173,7 @@ pub fn render_to_buffer<S: BuildHasher>(
                 }
                 CellValue::Text(t) => {
                     sheet
-                        .write_string(excel_row, col, t)
+                        .write_string(excel_row, col, sanitize_excel_text(&t).as_ref())
                         .map_err(|e| AppError::Report {
                             detail: format!("写文本失败：{e}"),
                         })?;
@@ -384,6 +384,18 @@ fn format_pct_text(v: f64) -> String {
     format!("{v:.2}%")
 }
 
+/// 防御 Excel 公式注入：对以 `=`、`+`、`-`、`@` 开头的文本前加单引号，
+/// 使其被识别为字面文本而非公式。Prometheus 标签值和资产映射值不受用户信任，
+/// 可能包含以公式触发字符开头的值。
+fn sanitize_excel_text(s: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = s.trim();
+    if trimmed.starts_with('=') || trimmed.starts_with('+') || trimmed.starts_with('-') || trimmed.starts_with('@') {
+        std::borrow::Cow::Owned(format!("'{}", s))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +421,24 @@ mod tests {
     fn format_pct_text_matches_excel_format() {
         assert_eq!(format_pct_text(90.0), "90.00%");
         assert_eq!(format_pct_text(22.5), "22.50%");
+    }
+
+    #[test]
+    fn sanitize_excel_text_injects_quote_before_formula_triggers() {
+        // 以 '=' '+' '-' '@' 开头的文本前应加单引号
+        assert_eq!(sanitize_excel_text("=cmd"), "'=cmd");
+        assert_eq!(sanitize_excel_text("+1+2"), "'+1+2");
+        assert_eq!(sanitize_excel_text("-1+2"), "'-1+2");
+        assert_eq!(sanitize_excel_text("@SUM(1)"), "'@SUM(1)");
+        // 含前导空格的情况
+        assert_eq!(sanitize_excel_text("  =cmd"), "'  =cmd");
+    }
+
+    #[test]
+    fn sanitize_excel_text_passes_safe_text() {
+        // 安全文本原样返回
+        assert_eq!(sanitize_excel_text("hello"), "hello");
+        assert_eq!(sanitize_excel_text("192.168.1.1"), "192.168.1.1");
+        assert_eq!(sanitize_excel_text(""), "");
     }
 }

@@ -53,8 +53,13 @@ impl PrometheusFetcher {
         let client = match client {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("HTTP 客户端构建失败（{e}），使用默认配置");
-                reqwest::Client::new()
+                // 构建失败极其罕见（仅有 timeout 配置），但仍尝试构建带超时的回退客户端，
+                // 避免无超时的 reqwest::Client::new() 导致请求永久挂起。
+                tracing::warn!("HTTP 客户端构建失败（{e}），使用带超时的回退配置");
+                reqwest::ClientBuilder::new()
+                    .timeout(std::time::Duration::from_secs(timeout_secs))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new())
             }
         };
         Self {
@@ -169,11 +174,9 @@ impl MetricFetcher for PrometheusFetcher {
             seg_start = seg_end;
         }
         if partial_failure {
-            // 返回 Err 让调用方发出 Warning，但已获取的数据不会丢失——
-            // pipeline 的 fetch_with_warning 在 Err 时会尝试 fallback 路径，
-            // 如果 fallback 也失败，则该指标标记为 N/A。
-            // 注意：这意味着部分已获取的数据会被丢弃，但这是诚实的做法——
-            // 部分时间范围的数据可能导致误导性的均值/峰值统计。
+            // 分段查询中途失败：返回 Err 让调用方发出 Warning。
+            // 注意：已获取的部分段数据会被丢弃——部分时间范围的数据可能
+            // 导致误导性的均值/峰值统计，因此宁可标记该指标为 N/A。
             return Err(AppError::Prometheus {
                 source_name: self.source_name.clone(),
                 url: self.redacted_url.clone(),

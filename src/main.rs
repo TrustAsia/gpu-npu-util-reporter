@@ -245,7 +245,14 @@ async fn main() -> ExitCode {
                         continue;
                     }
                     let escaped_ip = pipeline::escape_promql_regex(ip);
-                    let label_filter = format!("{}=~\"^{}.*\"", hm.host_label, escaped_ip);
+                    // 精确匹配主机 IP，避免前缀碰撞（如 "192.168.1.10" 不应匹配 "192.168.1.100"）。
+                    // host_label 值可能为裸 IP 或 "ip:port" 格式，用 ($|:) 精确锚定边界。
+                    let ip_regex = if ip.contains(':') {
+                        format!(r"^\[{}\]($|:)", escaped_ip)
+                    } else {
+                        format!(r"^{}($|:)", escaped_ip)
+                    };
+                    let label_filter = format!("{}=~\"{}\"", hm.host_label, ip_regex);
 
                     // 查询 CPU 利用率
                     let cpu_promql = format!("{}{{{}}}", hm.cpu_metric, label_filter);
