@@ -325,7 +325,8 @@ pub(crate) fn merge_points_into(
     incoming: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
 ) {
     existing.extend(incoming);
-    existing.sort_by_key(|(ts, _)| *ts);
+    // 按时间戳稳定排序，等时间戳时按值作二级排序以保证确定性去重。
+    existing.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
     // 同一时间戳保留最后一个值（最新观测），丢弃更早的点。
     // dedup_by 保留首个元素，因此先反转，去重后再反转回来。
     existing.reverse();

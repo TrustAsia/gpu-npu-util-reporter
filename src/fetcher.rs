@@ -354,6 +354,10 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
                         }
                         // Prometheus 时间戳为 Unix 秒（f64），转 i64 截断是安全的：
                         // 实际值范围远在 i64 精度内。
+                        // 防御 NaN/Inf 时间戳（恶意/异常上游），避免 UB（Rust 参考 § 数字转换）。
+                        if !ts.is_finite() {
+                            continue;
+                        }
                         #[allow(clippy::cast_possible_truncation)]
                         if let Some(dt) = DateTime::<Utc>::from_timestamp(ts as i64, 0) {
                             points.push((dt, v));
@@ -369,7 +373,7 @@ fn parse_response(resp: PromResponse, source: &str) -> Result<Vec<Series>, AppEr
             }
             PromResult::Vector { metric, value } => {
                 if let Ok(v) = value.1.parse::<f64>() {
-                    if v.is_finite() {
+                    if v.is_finite() && value.0.is_finite() {
                         #[allow(clippy::cast_possible_truncation)]
                         if let Some(dt) = DateTime::<Utc>::from_timestamp(value.0 as i64, 0) {
                             out.push(Series {

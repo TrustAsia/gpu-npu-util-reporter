@@ -133,15 +133,8 @@ pub fn render_to_buffer<S: BuildHasher>(
             let col = idx as u16;
             let hit_color = hit_colors.get(name.as_str()).copied();
             let v = cell_value(rec, name, &mapping_borrowed, row_idx, tz);
-            // 累计该列内容的显示宽度（I6）。
-            let text = match &v {
-                CellValue::Pct(p) => format_pct_text(*p),
-                CellValue::Number(n) => format!("{n:.2}"),
-                CellValue::Count(n) => n.to_string(),
-                CellValue::Text(t) => t.clone(),
-                CellValue::Na => "N/A".into(),
-            };
-            let w = display_width(&text);
+            // 累计该列内容的显示宽度（I6）：直接从 CellValue 计算，避免 String 克隆。
+            let w = cell_display_width(&v);
             if w > col_max_width[idx] {
                 col_max_width[idx] = w;
             }
@@ -377,6 +370,17 @@ const fn is_wide(c: char) -> bool {
         0xFF00..=0xFF60 |     // 全角 ASCII
         0xFFE0..=0xFFE6       // 全角符号
     )
+}
+
+/// 估算 CellValue 在 Excel 中的显示宽度（用于 I6 列宽自适应），避免提前 String 化。
+fn cell_display_width(v: &CellValue) -> f64 {
+    match v {
+        CellValue::Pct(p) => display_width(&format_pct_text(*p)),
+        CellValue::Number(n) => display_width(&format!("{n:.2}")),
+        CellValue::Count(n) => display_width(&n.to_string()),
+        CellValue::Text(t) => display_width(t),
+        CellValue::Na => display_width("N/A"),
+    }
 }
 
 /// 把 0–100 的利用率值格式化为报表里会显示的文本（用于估算列宽，与 0.00% 格式一致）。
