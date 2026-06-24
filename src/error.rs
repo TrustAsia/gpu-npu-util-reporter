@@ -82,6 +82,13 @@ impl AppError {
         }
         url.to_string()
     }
+
+    /// 对 reqwest 错误消息中的 URL 进行脱敏，防止凭据泄露。
+    /// reqwest 在连接失败/超时等场景会将完整请求 URL 嵌入错误文本，
+    /// 后者可能包含 `http://user:pass@host:port` 格式的凭据。
+    pub fn redact_url_in_error_text(text: &str, original_url: &str, redacted_url: &str) -> String {
+        text.replace(original_url, redacted_url)
+    }
 }
 
 #[cfg(test)]

@@ -32,8 +32,7 @@ pub trait MetricFetcher: Send + Sync {
 /// 调用 Prometheus HTTP API 的实现。
 pub struct PrometheusFetcher {
     client: reqwest::Client,
-    base_url: String,
-    /// 脱敏后的 URL（仅用于错误消息，避免日志泄露凭据）。
+    /// 脱敏后的 URL（凭据已移除），用于 HTTP 请求和错误消息。
     redacted_url: String,
     timeout: std::time::Duration,
     /// 用于错误提示的数据源别名。
@@ -64,7 +63,6 @@ impl PrometheusFetcher {
         };
         Self {
             client,
-            base_url,
             redacted_url,
             timeout: std::time::Duration::from_secs(timeout_secs),
             source_name,
@@ -187,7 +185,8 @@ impl MetricFetcher for PrometheusFetcher {
     }
 
     async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError> {
-        let url = format!("{}/api/v1/query", self.base_url.trim_end_matches('/'));
+        // 使用已脱敏的 URL 构造请求，防止凭据泄露到 reqwest 错误消息中。
+        let url = format!("{}/api/v1/query", self.redacted_url.trim_end_matches('/'));
         let resp = self
             .client
             .get(&url)
@@ -220,7 +219,8 @@ impl PrometheusFetcher {
         end: DateTime<Utc>,
         step: Duration,
     ) -> Result<Vec<Series>, AppError> {
-        let url = format!("{}/api/v1/query_range", self.base_url.trim_end_matches('/'));
+        // 使用已脱敏的 URL 构造请求，防止凭据泄露到 reqwest 错误消息中。
+        let url = format!("{}/api/v1/query_range", self.redacted_url.trim_end_matches('/'));
         let resp = self
             .client
             .get(&url)

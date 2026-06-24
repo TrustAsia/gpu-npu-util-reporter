@@ -125,9 +125,9 @@ pub fn render_to_buffer<S: BuildHasher>(
             hits.iter().map(|h| (h.column, h.color)).collect();
 
         for name in &order {
-            let idx = *col_index.get(name.as_str()).unwrap_or_else(|| {
-                panic!("列「{name}」不在 col_index 中，compute_column_order 结果异常")
-            });
+            let idx = *col_index.get(name.as_str()).ok_or_else(|| AppError::Report {
+                detail: format!("内部错误：列「{name}」不在 col_index 中，compute_column_order 结果异常"),
+            })?;
             // Excel 列数上限 16384，远在 u16 范围内。
             #[allow(clippy::cast_possible_truncation)]
             let col = idx as u16;

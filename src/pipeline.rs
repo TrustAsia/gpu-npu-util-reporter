@@ -697,34 +697,36 @@ pub(crate) fn series_key(s: &Series, spec: &DeviceSpec) -> String {
 }
 
 /// 从标签取主机 IP：优先指定标签名，否则 instance 去端口。
+/// 两路均剥离端口号（如 "192.168.1.1:9090" → "192.168.1.1"），
+/// 避免端口冒号被 main.rs 的 IPv6 检测误判导致 host 指标正则不匹配。
 pub(crate) fn extract_ip(labels: &HashMap<String, String>, prefer: &str) -> String {
-    if let Some(v) = labels.get(prefer) {
-        if !v.is_empty() {
-            return v.clone();
+    let raw = labels
+        .get(prefer)
+        .filter(|v| !v.is_empty())
+        .or_else(|| labels.get("instance"));
+    match raw {
+        Some(s) => strip_port(s),
+        None => String::new(),
+    }
+}
+
+/// 从 "ip:port" 或 "[ipv6]:port" 实例地址中剥离端口号，
+/// 返回裸 IP（IPv6 去掉外围方括号）。不含端口的地址原样返回。
+fn strip_port(s: &str) -> String {
+    if let Some((host, port)) = s.rsplit_once(':') {
+        if !port.is_empty()
+            && port.chars().all(|c| c.is_ascii_digit())
+            && (host.starts_with('[') || host.contains('.'))
+        {
+            // 剥 IPv6 方括号：[::1]:9090 → ::1
+            return host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(host)
+                .to_string();
         }
     }
-    labels
-        .get("instance")
-        .map(|s| {
-            // 剥端口：仅当末尾是 :<纯数字> 且 host 部分看起来像 IPv4 或
-            // 方括号 IPv6 时才剥。裸 IPv6（如 "2001:db8::1"）的 rsplit_once(':')
-            // 会误把末段当端口，需排除。
-            if let Some((host, port)) = s.rsplit_once(':') {
-                if !port.is_empty()
-                    && port.chars().all(|c| c.is_ascii_digit())
-                    && (host.starts_with('[') || host.contains('.'))
-                {
-                    // 剥 IPv6 方括号：[::1]:9090 → ::1
-                    return host
-                        .strip_prefix('[')
-                        .and_then(|h| h.strip_suffix(']'))
-                        .unwrap_or(host)
-                        .to_string();
-                }
-            }
-            s.clone()
-        })
-        .unwrap_or_default()
+    s.to_string()
 }
 
 /// 对字符串做 Prometheus 正则转义（RE2 语法）。
