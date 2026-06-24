@@ -17,6 +17,7 @@ use crate::config::AppConfig;
 use crate::devices::{DeviceSpec, MemoryStrategy};
 use crate::fetcher::MetricFetcher;
 use crate::processor::{self, aggregate, last_non_empty, CardRecord, Series};
+use crate::MAX_FALLBACK_DEPTH;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 
@@ -346,8 +347,6 @@ async fn fallback_used_total(ctx: &mut QueryContext<'_>, fallback: &MemoryStrate
 }
 
 /// `fallback_used_total` 的内部实现，带递归深度限制以防止配置错误导致的栈溢出。
-const MAX_FALLBACK_DEPTH: usize = 10;
-
 async fn fallback_used_total_inner(
     ctx: &mut QueryContext<'_>,
     fallback: &MemoryStrategy,

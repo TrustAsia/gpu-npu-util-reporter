@@ -880,9 +880,7 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
 }
 
 /// 校验显存策略中所有指标名的合法性（递归，因 fallback 嵌套）。
-/// 同时校验 fallback 嵌套深度不超过 [`MAX_FALLBACK_DEPTH`]，防止栈溢出。
-const MAX_FALLBACK_DEPTH: usize = 10;
-
+/// 同时校验 fallback 嵌套深度不超过 [`crate::MAX_FALLBACK_DEPTH`]，防止栈溢出。
 fn validate_memory_metrics(
     strategy: &crate::devices::MemoryStrategy,
     device_key: &str,
@@ -897,11 +895,12 @@ fn validate_memory_metrics_inner(
     path: &str,
     depth: usize,
 ) -> Result<(), AppError> {
-    if depth > MAX_FALLBACK_DEPTH {
+    if depth > crate::MAX_FALLBACK_DEPTH {
         return Err(AppError::Config {
             path: path.into(),
             reason: format!(
-                "devices.{device_key}.memory fallback 嵌套深度超过 {MAX_FALLBACK_DEPTH} 层，请检查配置"
+                "devices.{device_key}.memory fallback 嵌套深度超过 {} 层，请检查配置",
+                crate::MAX_FALLBACK_DEPTH
             ),
         });
     }

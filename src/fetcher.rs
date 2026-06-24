@@ -32,7 +32,10 @@ pub trait MetricFetcher: Send + Sync {
 /// 调用 Prometheus HTTP API 的实现。
 pub struct PrometheusFetcher {
     client: reqwest::Client,
-    /// 脱敏后的 URL（凭据已移除），用于 HTTP 请求和错误消息。
+    /// 完整 URL（可能含凭据），用于构造 HTTP 请求。reqwest 会从中提取
+    /// Basic Auth 凭据并添加 Authorization 头。
+    base_url: String,
+    /// 脱敏后的 URL（凭据已移除），仅用于错误消息，防止日志泄露。
     redacted_url: String,
     timeout: std::time::Duration,
     /// 用于错误提示的数据源别名。
@@ -63,9 +66,30 @@ impl PrometheusFetcher {
         };
         Self {
             client,
+            base_url,
             redacted_url,
             timeout: std::time::Duration::from_secs(timeout_secs),
             source_name,
+        }
+    }
+
+    /// 构造 `AppError::Prometheus`，同时对 reqwest 错误消息中的完整 URL
+    /// 进行脱敏（防止凭据泄露），然后嵌入 detail。
+    fn prom_error(&self, detail: impl std::fmt::Display) -> AppError {
+        let text = detail.to_string();
+        let safe_text = if self.base_url != self.redacted_url {
+            crate::error::AppError::redact_url_in_error_text(
+                &text,
+                &self.base_url,
+                &self.redacted_url,
+            )
+        } else {
+            text
+        };
+        AppError::Prometheus {
+            source_name: self.source_name.clone(),
+            url: self.redacted_url.clone(),
+            detail: safe_text,
         }
     }
 }
@@ -185,8 +209,8 @@ impl MetricFetcher for PrometheusFetcher {
     }
 
     async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError> {
-        // 使用已脱敏的 URL 构造请求，防止凭据泄露到 reqwest 错误消息中。
-        let url = format!("{}/api/v1/query", self.redacted_url.trim_end_matches('/'));
+        // 使用完整 base_url（含凭据，reqwest 会提取 Basic Auth 并添加到 Auth 头）。
+        let url = format!("{}/api/v1/query", self.base_url.trim_end_matches('/'));
         let resp = self
             .client
             .get(&url)
@@ -194,16 +218,10 @@ impl MetricFetcher for PrometheusFetcher {
             .timeout(self.timeout)
             .send()
             .await
-            .map_err(|e| AppError::Prometheus {
-                source_name: self.source_name.clone(),
-                url: self.redacted_url.clone(),
-                detail: format!("连接失败：{e}"),
-            })?;
-        let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
-            source_name: self.source_name.clone(),
-            url: self.redacted_url.clone(),
-            detail: format!("HTTP 请求失败：{e}"),
-        })?;
+            .map_err(|e| self.prom_error(format_args!("连接失败：{e}")))?;
+        let resp = resp
+            .error_for_status()
+            .map_err(|e| self.prom_error(format_args!("HTTP 请求失败：{e}")))?;
         let data: PromResponse =
             read_limited_json(resp, &self.source_name, &self.redacted_url).await?;
         parse_response(data, &self.source_name)
@@ -219,8 +237,8 @@ impl PrometheusFetcher {
         end: DateTime<Utc>,
         step: Duration,
     ) -> Result<Vec<Series>, AppError> {
-        // 使用已脱敏的 URL 构造请求，防止凭据泄露到 reqwest 错误消息中。
-        let url = format!("{}/api/v1/query_range", self.redacted_url.trim_end_matches('/'));
+        // 使用完整 base_url（含凭据，reqwest 会提取 Basic Auth 并添加到 Auth 头）。
+        let url = format!("{}/api/v1/query_range", self.base_url.trim_end_matches('/'));
         let resp = self
             .client
             .get(&url)
@@ -233,16 +251,10 @@ impl PrometheusFetcher {
             .timeout(self.timeout)
             .send()
             .await
-            .map_err(|e| AppError::Prometheus {
-                source_name: self.source_name.clone(),
-                url: self.redacted_url.clone(),
-                detail: format!("连接失败：{e}"),
-            })?;
-        let resp = resp.error_for_status().map_err(|e| AppError::Prometheus {
-            source_name: self.source_name.clone(),
-            url: self.redacted_url.clone(),
-            detail: format!("HTTP 请求失败：{e}"),
-        })?;
+            .map_err(|e| self.prom_error(format_args!("连接失败：{e}")))?;
+        let resp = resp
+            .error_for_status()
+            .map_err(|e| self.prom_error(format_args!("HTTP 请求失败：{e}")))?;
         let data: PromResponse =
             read_limited_json(resp, &self.source_name, &self.redacted_url).await?;
         parse_response(data, &self.source_name)
