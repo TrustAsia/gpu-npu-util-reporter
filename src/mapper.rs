@@ -330,11 +330,14 @@ pub fn missing_anchor_warnings(base: &[&str], mapping_cols: &[MappingColumn]) ->
 pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Vec<String> {
     let mut result: Vec<String> = base.iter().map(ToString::to_string).collect();
     // 目标 index 仅取决于基础列（锚点被约束为基础列），互不影响
+    // 缺失锚点的列追加到末尾：target 需大于所有有效锚点的 target，
+    // 否则与指向末尾基础列 After 的有效锚点列 target 相同时会交错插入。
+    let missing_target = base.len() + mapping_cols.len();
     let mut placements: Vec<(usize, String)> = mapping_cols
         .iter()
         .map(|c| {
             let target = base.iter().position(|x| *x == c.position.anchor).map_or(
-                result.len(),
+                missing_target,
                 |idx| match c.position.direction {
                     Direction::Before => idx,
                     Direction::After => idx + 1,
@@ -656,6 +659,33 @@ mod tests {
         }];
         let order = compute_column_order(BASE_COLUMNS, &cols);
         assert_eq!(order.last().unwrap(), "X");
+    }
+
+    #[test]
+    fn column_order_missing_anchor_after_valid_after_last_base() {
+        // 缺失锚点列应排在末尾，不与指向末尾基础列 After 的有效锚点列交错。
+        // BASE_COLUMNS 最后一列是"显存占用率末条数据时间"。
+        let last_base = BASE_COLUMNS.last().unwrap();
+        let cols = vec![
+            MappingColumn {
+                source_field: "机房".into(),
+                rename: "机房".into(),
+                position: InsertPosition::after("不存在"), // 缺失锚点，应追加到末尾
+            },
+            MappingColumn {
+                source_field: "负责人".into(),
+                rename: "负责人".into(),
+                position: InsertPosition::after(*last_base), // 有效锚点，最后一列之后
+            },
+        ];
+        let order = compute_column_order(BASE_COLUMNS, &cols);
+        let last_base_idx = order.iter().position(|s| s == *last_base).unwrap();
+        let owner_idx = order.iter().position(|s| s == "负责人").unwrap();
+        let room_idx = order.iter().position(|s| s == "机房").unwrap();
+        // 有效锚点列紧随锚点之后
+        assert_eq!(owner_idx, last_base_idx + 1);
+        // 缺失锚点列在有效锚点列之后（追加到末尾）
+        assert!(room_idx > owner_idx, "缺失锚点列「机房」应在有效锚点列「负责人」之后，实际 order: {order:?}");
     }
 
     #[test]
