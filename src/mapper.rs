@@ -21,9 +21,8 @@ use crate::processor::CardRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// 报表"基础列"的有序清单（与 reporter 共用）。
-/// mapper 的锚点列名引用其中之一。
-pub const BASE_COLUMNS: &[&str] = &[
+/// 报表核心基础列（始终出现）。
+const CORE_BASE_COLUMNS: &[&str] = &[
     "数据来源",
     "主机IP",
     "节点名称",
@@ -46,6 +45,73 @@ pub const BASE_COLUMNS: &[&str] = &[
     "显存占用率首条数据时间",
     "显存占用率末条数据时间",
 ];
+
+/// 设备温度列（按温度指标配置时出现）。
+const TEMP_COLUMNS: &[&str] = &[
+    "设备温度平均值",
+    "设备温度峰值",
+    "设备温度峰值出现时间",
+    "设备温度数据量",
+    "设备温度首条数据时间",
+    "设备温度末条数据时间",
+];
+
+/// 设备功率列（按功率指标配置时出现）。
+const POWER_COLUMNS: &[&str] = &[
+    "设备功率平均值",
+    "设备功率峰值",
+    "设备功率峰值出现时间",
+    "设备功率数据量",
+    "设备功率首条数据时间",
+    "设备功率末条数据时间",
+];
+
+/// 主机 CPU 列（启用主机指标时出现）。
+const HOST_CPU_COLUMNS: &[&str] = &[
+    "主机CPU利用率平均值",
+    "主机CPU利用率峰值",
+    "主机CPU利用率峰值出现时间",
+];
+
+/// 主机内存列（启用主机指标时出现）。
+const HOST_MEM_COLUMNS: &[&str] = &[
+    "主机内存利用率平均值",
+    "主机内存利用率峰值",
+    "主机内存利用率峰值出现时间",
+];
+
+/// 标志位：哪些可选指标组应出现在基础列中。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ColumnFlags {
+    pub has_temp: bool,
+    pub has_power: bool,
+    pub has_host_cpu: bool,
+    pub has_host_mem: bool,
+}
+
+/// 根据配置构建基础列有序清单。
+///
+/// 核心列始终出现；可选列组按 flags 决定是否追加。
+#[must_use]
+pub fn build_base_columns(flags: ColumnFlags) -> Vec<String> {
+    let mut cols: Vec<String> = CORE_BASE_COLUMNS.iter().map(|s| (*s).to_string()).collect();
+    if flags.has_temp {
+        cols.extend(TEMP_COLUMNS.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_power {
+        cols.extend(POWER_COLUMNS.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_host_cpu {
+        cols.extend(HOST_CPU_COLUMNS.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_host_mem {
+        cols.extend(HOST_MEM_COLUMNS.iter().map(|s| (*s).to_string()));
+    }
+    cols
+}
+
+/// 向后兼容：默认基础列（仅核心列，不含可选指标组）。
+pub const BASE_COLUMNS: &[&str] = CORE_BASE_COLUMNS;
 
 /// 列插入位置：相对于某锚点列的前/后。
 ///
@@ -148,7 +214,10 @@ impl MappingConfig {
     /// 收集所有来源的映射列（owned clone），用于需要所有权的场景。
     #[must_use]
     pub fn all_columns_owned(&self) -> Vec<MappingColumn> {
-        self.sources.iter().flat_map(|s| s.columns.clone()).collect()
+        self.sources
+            .iter()
+            .flat_map(|s| s.columns.clone())
+            .collect()
     }
 
     /// 检测所有来源中是否存在重复的 rename，返回警告列表。
@@ -164,7 +233,8 @@ impl MappingConfig {
         }
         dupes.sort();
         dupes.dedup();
-        dupes.into_iter()
+        dupes
+            .into_iter()
             .map(|r| format!("映射列 rename「{r}」在多个来源中重复，将导致数据覆盖"))
             .collect()
     }
@@ -252,13 +322,13 @@ pub fn compute_column_order(base: &[&str], mapping_cols: &[MappingColumn]) -> Ve
     let mut placements: Vec<(usize, String)> = mapping_cols
         .iter()
         .map(|c| {
-            let target = base
-                .iter()
-                .position(|x| *x == c.position.anchor)
-                .map_or(result.len(), |idx| match c.position.direction {
+            let target = base.iter().position(|x| *x == c.position.anchor).map_or(
+                result.len(),
+                |idx| match c.position.direction {
                     Direction::Before => idx,
                     Direction::After => idx + 1,
-                });
+                },
+            );
             (target, c.rename.clone())
         })
         .collect();
@@ -281,7 +351,11 @@ const MAX_ASSET_ROWS: usize = 1_000_000;
 /// # Errors
 ///
 /// 返回 [`AppError::Mapping`] 当文件读取/解析失败或格式不支持。
-pub fn load_asset_table(path: &str, match_keys: &str, sheet: Option<&str>) -> Result<Vec<AssetRow>, AppError> {
+pub fn load_asset_table(
+    path: &str,
+    match_keys: &str,
+    sheet: Option<&str>,
+) -> Result<Vec<AssetRow>, AppError> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -300,7 +374,11 @@ pub fn load_asset_table(path: &str, match_keys: &str, sheet: Option<&str>) -> Re
 }
 
 /// 检查 `match_keys` 列是否存在于表头中，不存在时返回错误。
-fn validate_match_key_in_headers(headers: &[String], match_keys: &str, path: &str) -> Result<(), AppError> {
+fn validate_match_key_in_headers(
+    headers: &[String],
+    match_keys: &str,
+    path: &str,
+) -> Result<(), AppError> {
     if match_keys.is_empty() {
         return Err(AppError::Mapping {
             path: path.into(),
@@ -361,7 +439,11 @@ fn load_csv(path: &str, match_keys: &str) -> Result<Vec<AssetRow>, AppError> {
     Ok(rows)
 }
 
-fn load_excel(path: &str, match_keys: &str, sheet: Option<&str>) -> Result<Vec<AssetRow>, AppError> {
+fn load_excel(
+    path: &str,
+    match_keys: &str,
+    sheet: Option<&str>,
+) -> Result<Vec<AssetRow>, AppError> {
     use calamine::{open_workbook_auto, Reader, Sheets};
     let mut book: Sheets<_> = open_workbook_auto(path).map_err(|e| AppError::Mapping {
         path: path.into(),
@@ -491,6 +573,24 @@ mod tests {
             mem_count: None,
             mem_first_time: None,
             mem_last_time: None,
+            temp_avg: None,
+            temp_peak: None,
+            temp_peak_time: None,
+            temp_count: None,
+            temp_first_time: None,
+            temp_last_time: None,
+            power_avg: None,
+            power_peak: None,
+            power_peak_time: None,
+            power_count: None,
+            power_first_time: None,
+            power_last_time: None,
+            host_cpu_avg: None,
+            host_cpu_peak: None,
+            host_cpu_peak_time: None,
+            host_mem_avg: None,
+            host_mem_peak: None,
+            host_mem_peak_time: None,
             range_start: Utc.timestamp_opt(0, 0).unwrap(),
             range_end: Utc.timestamp_opt(60, 0).unwrap(),
         }
@@ -620,7 +720,10 @@ mod tests {
         let (index, _) = build_asset_index(&assets);
 
         let miss = join_record(&rec("1.1.1.1", "0"), &index, &source);
-        assert!(miss.is_empty(), "未知字段名应导致 join key 为空串，不会命中");
+        assert!(
+            miss.is_empty(),
+            "未知字段名应导致 join key 为空串，不会命中"
+        );
     }
 
     #[test]
@@ -790,7 +893,11 @@ mod tests {
         assert_eq!(index.len(), 1, "重复 key 应只保留首行");
         assert_eq!(warnings.len(), 1, "应有 1 条重复警告");
         assert!(warnings[0].contains("1.1.1.1"), "警告应包含重复 key");
-        assert_eq!(index.get("1.1.1.1").unwrap().get("机房").unwrap(), "北京A", "应保留首行");
+        assert_eq!(
+            index.get("1.1.1.1").unwrap().get("机房").unwrap(),
+            "北京A",
+            "应保留首行"
+        );
     }
 
     #[test]
@@ -843,6 +950,9 @@ mod tests {
                 }],
             }],
         };
-        assert!(cfg.duplicate_rename_warnings().is_empty(), "无重复 rename 不应产出警告");
+        assert!(
+            cfg.duplicate_rename_warnings().is_empty(),
+            "无重复 rename 不应产出警告"
+        );
     }
 }

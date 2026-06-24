@@ -72,6 +72,7 @@ pub fn render_to_buffer<S: BuildHasher>(
         .set_background_color(Color::RGB(0x001F_4E79))
         .set_font_color(Color::White);
     let pct_fmt = Format::new().set_num_format("0.00%");
+    let num_fmt = Format::new().set_num_format("0.00");
 
     // 列名 → 列索引
     let col_index: HashMap<&str, usize> = order
@@ -104,6 +105,12 @@ pub fn render_to_buffer<S: BuildHasher>(
             .set_background_color(Color::RGB(rgb))
             .set_num_format("0.00%")
     };
+    let num_color = |hex: &HexColor| -> Format {
+        let rgb = u32::from_str_radix(&hex.value()[1..], 16).unwrap_or(0xFF0000);
+        Format::new()
+            .set_background_color(Color::RGB(rgb))
+            .set_num_format("0.00")
+    };
 
     // 每列内容的显示宽度（CJK 约占 2 个拉丁字符宽），用于列宽自适应（I6 修复）。
     let mut col_max_width: Vec<f64> = vec![0.0; order.len()];
@@ -129,6 +136,7 @@ pub fn render_to_buffer<S: BuildHasher>(
             // 累计该列内容的显示宽度（I6）。
             let text = match &v {
                 CellValue::Pct(p) => format_pct_text(*p),
+                CellValue::Number(n) => format!("{n:.2}"),
                 CellValue::Count(n) => n.to_string(),
                 CellValue::Text(t) => t.clone(),
                 CellValue::Na => "N/A".into(),
@@ -142,6 +150,14 @@ pub fn render_to_buffer<S: BuildHasher>(
                     let fmt = hit_color.map_or_else(|| pct_fmt.clone(), pct_color);
                     sheet
                         .write_number_with_format(excel_row, col, p / 100.0, &fmt)
+                        .map_err(|e| AppError::Report {
+                            detail: format!("写单元格失败：{e}"),
+                        })?;
+                }
+                CellValue::Number(n) => {
+                    let fmt = hit_color.map_or_else(|| num_fmt.clone(), num_color);
+                    sheet
+                        .write_number_with_format(excel_row, col, n, &fmt)
                         .map_err(|e| AppError::Report {
                             detail: format!("写单元格失败：{e}"),
                         })?;
@@ -180,9 +196,11 @@ pub fn render_to_buffer<S: BuildHasher>(
         let width = header_w.max(content_w).clamp(10.0, 50.0);
         // Excel 列数上限 16384，远在 u16 范围内。
         #[allow(clippy::cast_possible_truncation)]
-        sheet.set_column_width(i as u16, width).map_err(|e| AppError::Report {
-            detail: format!("设置列宽失败：{e}"),
-        })?;
+        sheet
+            .set_column_width(i as u16, width)
+            .map_err(|e| AppError::Report {
+                detail: format!("设置列宽失败：{e}"),
+            })?;
     }
 
     wb.save_to_buffer().map_err(|e| AppError::Report {
@@ -193,10 +211,13 @@ pub fn render_to_buffer<S: BuildHasher>(
 /// 单元格取值类型。
 ///
 /// `Pct` 是 0–100 的利用率值（写入时除以 100 配合 `0.00%` 格式）；
+/// `Number` 是绝对值（如温度 °C、功率 W），以 `0.00` 格式写入；
 /// 时间列统一以 `Text` 输出 `YYYY-MM-DD HH:MM:SS` 字符串（PRD §3 显示要求），
 /// 避免依赖 `rust_xlsxwriter` 的日期时间转换 API。
 enum CellValue {
     Pct(f64),
+    /// 绝对值（如温度 °C、功率 W），以两位小数写入 Excel。
+    Number(f64),
     /// 数据量（整数），以普通数字写入 Excel。
     Count(usize),
     Text(String),
@@ -213,7 +234,9 @@ fn cell_value(
 ) -> CellValue {
     // UTC 时间戳 → 按配置时区渲染为 "YYYY-MM-DD HH:MM:SS" 字符串
     let ts = |dt: chrono::DateTime<chrono::Utc>| {
-        dt.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S").to_string()
+        dt.with_timezone(&tz)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
     };
     match col {
         "数据来源" => CellValue::Text(rec.source_name.clone()),
@@ -226,7 +249,9 @@ fn cell_value(
         "容器名称" => CellValue::Text(rec.container.clone()),
         "取值时间范围" => CellValue::Text(format!(
             "{} ~ {}",
-            rec.range_start.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
+            rec.range_start
+                .with_timezone(&tz)
+                .format("%Y-%m-%d %H:%M:%S"),
             rec.range_end.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S")
         )),
         "核心利用率平均值" => rec.core_avg.map_or(CellValue::Na, CellValue::Pct),
@@ -235,9 +260,7 @@ fn cell_value(
             .core_peak_time
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
-        "核心利用率数据量" => rec
-            .core_count
-            .map_or(CellValue::Na, CellValue::Count),
+        "核心利用率数据量" => rec.core_count.map_or(CellValue::Na, CellValue::Count),
         "核心利用率首条数据时间" => rec
             .core_first_time
             .map(ts)
@@ -252,9 +275,7 @@ fn cell_value(
             .mem_peak_time
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
-        "显存占用率数据量" => rec
-            .mem_count
-            .map_or(CellValue::Na, CellValue::Count),
+        "显存占用率数据量" => rec.mem_count.map_or(CellValue::Na, CellValue::Count),
         "显存占用率首条数据时间" => rec
             .mem_first_time
             .map(ts)
@@ -263,11 +284,54 @@ fn cell_value(
             .mem_last_time
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
+        "设备温度平均值" => rec.temp_avg.map_or(CellValue::Na, CellValue::Number),
+        "设备温度峰值" => rec.temp_peak.map_or(CellValue::Na, CellValue::Number),
+        "设备温度峰值出现时间" => rec
+            .temp_peak_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "设备温度数据量" => rec.temp_count.map_or(CellValue::Na, CellValue::Count),
+        "设备温度首条数据时间" => rec
+            .temp_first_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "设备温度末条数据时间" => rec
+            .temp_last_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "设备功率平均值" => rec.power_avg.map_or(CellValue::Na, CellValue::Number),
+        "设备功率峰值" => rec.power_peak.map_or(CellValue::Na, CellValue::Number),
+        "设备功率峰值出现时间" => rec
+            .power_peak_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "设备功率数据量" => rec.power_count.map_or(CellValue::Na, CellValue::Count),
+        "设备功率首条数据时间" => rec
+            .power_first_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "设备功率末条数据时间" => rec
+            .power_last_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "主机CPU利用率平均值" => rec.host_cpu_avg.map_or(CellValue::Na, CellValue::Pct),
+        "主机CPU利用率峰值" => rec.host_cpu_peak.map_or(CellValue::Na, CellValue::Pct),
+        "主机CPU利用率峰值出现时间" => rec
+            .host_cpu_peak_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
+        "主机内存利用率平均值" => rec.host_mem_avg.map_or(CellValue::Na, CellValue::Pct),
+        "主机内存利用率峰值" => rec.host_mem_peak.map_or(CellValue::Na, CellValue::Pct),
+        "主机内存利用率峰值出现时间" => rec
+            .host_mem_peak_time
+            .map(ts)
+            .map_or(CellValue::Na, CellValue::Text),
         other => {
             // 映射列：从 mapping_borrowed 取，未命中写空串
-            mapping_borrowed
-                .get(&(row_idx, other))
-                .map_or_else(|| CellValue::Text(String::new()), |v| CellValue::Text((*v).to_string()))
+            mapping_borrowed.get(&(row_idx, other)).map_or_else(
+                || CellValue::Text(String::new()),
+                |v| CellValue::Text((*v).to_string()),
+            )
         }
     }
 }

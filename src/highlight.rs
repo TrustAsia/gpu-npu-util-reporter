@@ -13,6 +13,14 @@ pub const COL_CORE_AVG: &str = "核心利用率平均值";
 pub const COL_CORE_PEAK: &str = "核心利用率峰值";
 pub const COL_MEM_AVG: &str = "显存占用率平均值";
 pub const COL_MEM_PEAK: &str = "显存占用率峰值";
+pub const COL_TEMP_AVG: &str = "设备温度平均值";
+pub const COL_TEMP_PEAK: &str = "设备温度峰值";
+pub const COL_POWER_AVG: &str = "设备功率平均值";
+pub const COL_POWER_PEAK: &str = "设备功率峰值";
+pub const COL_HOST_CPU_AVG: &str = "主机CPU利用率平均值";
+pub const COL_HOST_CPU_PEAK: &str = "主机CPU利用率峰值";
+pub const COL_HOST_MEM_AVG: &str = "主机内存利用率平均值";
+pub const COL_HOST_MEM_PEAK: &str = "主机内存利用率峰值";
 
 /// HEX 颜色包装类型，反序列化时校验合法性（`#RRGGBB` 或 `#RGB`）。
 ///
@@ -33,8 +41,19 @@ impl HexColor {
     pub fn parse(raw: &str, trigger: &str) -> Result<Self, AppError> {
         let s = raw.trim().to_ascii_uppercase();
         // #RGB → #RRGGBB：短格式自动展开，保证下游（如 reporter）只需处理 7 字符形式。
-        let expanded = if s.starts_with('#') && s.len() == 4 && s[1..].chars().all(|c| c.is_ascii_hexdigit()) {
-            format!("#{}{}{}{}{}{}", &s[1..2], &s[1..2], &s[2..3], &s[2..3], &s[3..4], &s[3..4])
+        let expanded = if s.starts_with('#')
+            && s.len() == 4
+            && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            format!(
+                "#{}{}{}{}{}{}",
+                &s[1..2],
+                &s[1..2],
+                &s[2..3],
+                &s[2..3],
+                &s[3..4],
+                &s[3..4]
+            )
         } else {
             s
         };
@@ -83,7 +102,7 @@ pub struct TriggerConfig {
     pub color: HexColor,
 }
 
-/// 8 个触发器的显式集合；`None` 字段 = 该触发器未配置/关闭。
+/// 24 个触发器的显式集合；`None` 字段 = 该触发器未配置/关闭。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ThresholdTriggers {
@@ -103,6 +122,42 @@ pub struct ThresholdTriggers {
     pub mem_peak_above: Option<TriggerConfig>,
     #[serde(default)]
     pub mem_peak_below: Option<TriggerConfig>,
+    // 设备温度
+    #[serde(default)]
+    pub temp_avg_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub temp_avg_below: Option<TriggerConfig>,
+    #[serde(default)]
+    pub temp_peak_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub temp_peak_below: Option<TriggerConfig>,
+    // 设备功率
+    #[serde(default)]
+    pub power_avg_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub power_avg_below: Option<TriggerConfig>,
+    #[serde(default)]
+    pub power_peak_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub power_peak_below: Option<TriggerConfig>,
+    // 主机 CPU
+    #[serde(default)]
+    pub host_cpu_avg_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_cpu_avg_below: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_cpu_peak_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_cpu_peak_below: Option<TriggerConfig>,
+    // 主机内存
+    #[serde(default)]
+    pub host_mem_avg_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_mem_avg_below: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_mem_peak_above: Option<TriggerConfig>,
+    #[serde(default)]
+    pub host_mem_peak_below: Option<TriggerConfig>,
 }
 
 /// 一条命中结果：列名 + 颜色（借用，避免克隆）。
@@ -149,6 +204,70 @@ impl ThresholdTriggers {
             self.mem_peak_below.as_ref(),
             r.mem_peak,
             COL_MEM_PEAK,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.temp_avg_above.as_ref(),
+            self.temp_avg_below.as_ref(),
+            r.temp_avg,
+            COL_TEMP_AVG,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.temp_peak_above.as_ref(),
+            self.temp_peak_below.as_ref(),
+            r.temp_peak,
+            COL_TEMP_PEAK,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.power_avg_above.as_ref(),
+            self.power_avg_below.as_ref(),
+            r.power_avg,
+            COL_POWER_AVG,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.power_peak_above.as_ref(),
+            self.power_peak_below.as_ref(),
+            r.power_peak,
+            COL_POWER_PEAK,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.host_cpu_avg_above.as_ref(),
+            self.host_cpu_avg_below.as_ref(),
+            r.host_cpu_avg,
+            COL_HOST_CPU_AVG,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.host_cpu_peak_above.as_ref(),
+            self.host_cpu_peak_below.as_ref(),
+            r.host_cpu_peak,
+            COL_HOST_CPU_PEAK,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.host_mem_avg_above.as_ref(),
+            self.host_mem_avg_below.as_ref(),
+            r.host_mem_avg,
+            COL_HOST_MEM_AVG,
+        ) {
+            hits.push(h);
+        }
+        if let Some(h) = first_hit(
+            self.host_mem_peak_above.as_ref(),
+            self.host_mem_peak_below.as_ref(),
+            r.host_mem_peak,
+            COL_HOST_MEM_PEAK,
         ) {
             hits.push(h);
         }
@@ -213,6 +332,24 @@ mod tests {
             mem_count: None,
             mem_first_time: None,
             mem_last_time: None,
+            temp_avg: None,
+            temp_peak: None,
+            temp_peak_time: None,
+            temp_count: None,
+            temp_first_time: None,
+            temp_last_time: None,
+            power_avg: None,
+            power_peak: None,
+            power_peak_time: None,
+            power_count: None,
+            power_first_time: None,
+            power_last_time: None,
+            host_cpu_avg: None,
+            host_cpu_peak: None,
+            host_cpu_peak_time: None,
+            host_mem_avg: None,
+            host_mem_peak: None,
+            host_mem_peak_time: None,
             range_start: Utc.timestamp_opt(0, 0).unwrap(),
             range_end: Utc.timestamp_opt(60, 0).unwrap(),
         }

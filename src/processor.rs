@@ -51,6 +51,42 @@ pub struct CardRecord {
     pub mem_first_time: Option<DateTime<Utc>>,
     /// 显存占用率最后一条数据时间。None = N/A。
     pub mem_last_time: Option<DateTime<Utc>>,
+    /// 设备温度平均值（°C）。None = N/A（设备类型未配置温度指标时）。
+    pub temp_avg: Option<f64>,
+    /// 设备温度峰值。
+    pub temp_peak: Option<f64>,
+    /// 温度峰值出现时间。
+    pub temp_peak_time: Option<DateTime<Utc>>,
+    /// 温度数据点数量。
+    pub temp_count: Option<usize>,
+    /// 温度首条数据时间。
+    pub temp_first_time: Option<DateTime<Utc>>,
+    /// 温度末条数据时间。
+    pub temp_last_time: Option<DateTime<Utc>>,
+    /// 设备功率平均值（W）。None = N/A（设备类型未配置功率指标时）。
+    pub power_avg: Option<f64>,
+    /// 设备功率峰值。
+    pub power_peak: Option<f64>,
+    /// 功率峰值出现时间。
+    pub power_peak_time: Option<DateTime<Utc>>,
+    /// 功率数据点数量。
+    pub power_count: Option<usize>,
+    /// 功率首条数据时间。
+    pub power_first_time: Option<DateTime<Utc>>,
+    /// 功率末条数据时间。
+    pub power_last_time: Option<DateTime<Utc>>,
+    /// 主机 CPU 利用率平均值（%）。None = N/A（未启用主机指标采集时）。
+    pub host_cpu_avg: Option<f64>,
+    /// 主机 CPU 利用率峰值。
+    pub host_cpu_peak: Option<f64>,
+    /// 主机 CPU 峰值出现时间。
+    pub host_cpu_peak_time: Option<DateTime<Utc>>,
+    /// 主机内存利用率平均值（%）。None = N/A。
+    pub host_mem_avg: Option<f64>,
+    /// 主机内存利用率峰值。
+    pub host_mem_peak: Option<f64>,
+    /// 主机内存峰值出现时间。
+    pub host_mem_peak_time: Option<DateTime<Utc>>,
     /// 取值时间范围起点。
     pub range_start: DateTime<Utc>,
     /// 取值时间范围终点。
@@ -108,16 +144,8 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
             .then(tb.cmp(ta))
     });
     // 首/末数据时间：按时间戳排序取最早和最晚
-    let first_time = points
-        .iter()
-        .map(|(ts, _)| *ts)
-        .min()
-        .unwrap(); // 非空迭代器，min 必返回 Some
-    let last_time = points
-        .iter()
-        .map(|(ts, _)| *ts)
-        .max()
-        .unwrap();
+    let first_time = points.iter().map(|(ts, _)| *ts).min().unwrap(); // 非空迭代器，min 必返回 Some
+    let last_time = points.iter().map(|(ts, _)| *ts).max().unwrap();
     best.map(|(peak_time, peak)| MetricStats {
         avg,
         peak,

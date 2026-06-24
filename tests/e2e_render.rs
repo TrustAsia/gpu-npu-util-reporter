@@ -40,6 +40,24 @@ fn renders_report_with_highlight_and_reads_back() {
         mem_count: Some(1440),
         mem_first_time: Some(Utc.timestamp_opt(0, 0).unwrap()),
         mem_last_time: Some(Utc.timestamp_opt(1439, 0).unwrap()),
+        temp_avg: None,
+        temp_peak: None,
+        temp_peak_time: None,
+        temp_count: None,
+        temp_first_time: None,
+        temp_last_time: None,
+        power_avg: None,
+        power_peak: None,
+        power_peak_time: None,
+        power_count: None,
+        power_first_time: None,
+        power_last_time: None,
+        host_cpu_avg: None,
+        host_cpu_peak: None,
+        host_cpu_peak_time: None,
+        host_mem_avg: None,
+        host_mem_peak: None,
+        host_mem_peak_time: None,
         range_start: Utc.timestamp_opt(0, 0).unwrap(),
         range_end: Utc.timestamp_opt(2000, 0).unwrap(),
     };
@@ -89,6 +107,24 @@ fn renders_report_with_mapping_columns() {
         mem_count: Some(1440),
         mem_first_time: Some(Utc.timestamp_opt(0, 0).unwrap()),
         mem_last_time: Some(Utc.timestamp_opt(1439, 0).unwrap()),
+        temp_avg: None,
+        temp_peak: None,
+        temp_peak_time: None,
+        temp_count: None,
+        temp_first_time: None,
+        temp_last_time: None,
+        power_avg: None,
+        power_peak: None,
+        power_peak_time: None,
+        power_count: None,
+        power_first_time: None,
+        power_last_time: None,
+        host_cpu_avg: None,
+        host_cpu_peak: None,
+        host_cpu_peak_time: None,
+        host_mem_avg: None,
+        host_mem_peak: None,
+        host_mem_peak_time: None,
         range_start: Utc.timestamp_opt(0, 0).unwrap(),
         range_end: Utc.timestamp_opt(2000, 0).unwrap(),
     };
@@ -135,18 +171,10 @@ fn renders_report_with_mapping_columns() {
 
     // 验证映射列内容：找到"机房"列，确认数据行值为"北京A区"
     let machine_room_col = (0..range.width())
-        .find(|&c| {
-            range
-                .get((0, c))
-                .map_or(false, |v| v.to_string() == "机房")
-        })
+        .find(|&c| range.get((0, c)).map_or(false, |v| v.to_string() == "机房"))
         .expect("should find machine room column");
     let cell = range
         .get((1, machine_room_col))
         .expect("data row should have machine room cell");
-    assert_eq!(
-        cell.to_string(),
-        "北京A区",
-        "映射列应写入正确的资产值"
-    );
+    assert_eq!(cell.to_string(), "北京A区", "映射列应写入正确的资产值");
 }

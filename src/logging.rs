@@ -8,9 +8,9 @@
 use crate::config::LogConfig;
 use std::path::Path;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Layer;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
 
 /// 初始化日志系统。
 ///
@@ -27,10 +27,9 @@ pub fn init_logging(cfg: &LogConfig) -> Option<tracing_appender::non_blocking::W
     let console_level = cfg.console_level.as_str();
     let file_level = cfg.file_level.as_str();
 
-    let console_filter = EnvFilter::try_new(console_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    let file_filter = EnvFilter::try_new(file_level)
-        .unwrap_or_else(|_| EnvFilter::new("debug"));
+    let console_filter =
+        EnvFilter::try_new(console_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    let file_filter = EnvFilter::try_new(file_level).unwrap_or_else(|_| EnvFilter::new("debug"));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
@@ -43,16 +42,25 @@ pub fn init_logging(cfg: &LogConfig) -> Option<tracing_appender::non_blocking::W
             }
         }
         let file = std::fs::File::create(&cfg.file_path).unwrap_or_else(|e| {
-            eprintln!("[警告] 无法创建日志文件 {}：{e}，仅使用控制台输出", cfg.file_path);
+            eprintln!(
+                "[警告] 无法创建日志文件 {}：{e}，仅使用控制台输出",
+                cfg.file_path
+            );
             // 跨平台 null 设备：Unix 用 /dev/null，Windows 用 NUL。
             // 如果 null 设备也无法创建（极端情况），panic 是合理的，
             // 因为这表明文件系统完全不可用。
             #[cfg(unix)]
-            { std::fs::File::create("/dev/null").expect("无法创建 /dev/null") }
+            {
+                std::fs::File::create("/dev/null").expect("无法创建 /dev/null")
+            }
             #[cfg(windows)]
-            { std::fs::File::create("NUL").expect("无法创建 NUL") }
+            {
+                std::fs::File::create("NUL").expect("无法创建 NUL")
+            }
             #[cfg(not(any(unix, windows)))]
-            { std::fs::File::create("/dev/null").expect("无法创建 null 设备") }
+            {
+                std::fs::File::create("/dev/null").expect("无法创建 null 设备")
+            }
         });
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
         let file_layer = tracing_subscriber::fmt::layer()
@@ -67,9 +75,7 @@ pub fn init_logging(cfg: &LogConfig) -> Option<tracing_appender::non_blocking::W
             .init();
         Some(guard)
     } else {
-        tracing_subscriber::registry()
-            .with(fmt_layer)
-            .init();
+        tracing_subscriber::registry().with(fmt_layer).init();
         None
     }
 }

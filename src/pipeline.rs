@@ -159,10 +159,24 @@ pub async fn collect_device(
         mem_series
     };
 
-    // 4. 分组：(host_ip, card_id) → (core?, mem?)。同一卡多 series（如 Pod 漂移
-    //    产出多条带不同归属标签的 series）的点会被合并进同一槽位，而非互相覆写，
-    //    避免聚合数据丢失。槽位用 Option 互不覆写（I7 修复）。
+    // 3.5. 设备温度/功率（可选，取决于 DeviceSpec 配置）
+    let temp_series = if let Some(tm) = &ctx.spec.temp_metric {
+        fetch_with_warning(&mut ctx, tm).await
+    } else {
+        Vec::new()
+    };
+    let power_series = if let Some(pm) = &ctx.spec.power_metric {
+        fetch_with_warning(&mut ctx, pm).await
+    } else {
+        Vec::new()
+    };
+
+    // 4. 分组：(host_ip, card_id) → (core?, mem?, temp?, power?)。同一卡多 series
+    //    （如 Pod 漂移产出多条带不同归属标签的 series）的点会被合并进同一槽位，
+    //    而非互相覆写，避免聚合数据丢失。槽位用 Option 互不覆写（I7 修复）。
     let mut groups: HashMap<String, (Option<Series>, Option<Series>)> = HashMap::new();
+    let mut temp_by_key: HashMap<String, Option<Series>> = HashMap::new();
+    let mut power_by_key: HashMap<String, Option<Series>> = HashMap::new();
     for s in core_series {
         let key = series_key(&s, ctx.spec);
         merge_into(&mut groups.entry(key).or_default().0, s);
@@ -170,6 +184,14 @@ pub async fn collect_device(
     for s in effective_mem {
         let key = series_key(&s, ctx.spec);
         merge_into(&mut groups.entry(key).or_default().1, s);
+    }
+    for s in temp_series {
+        let key = series_key(&s, ctx.spec);
+        merge_into(&mut temp_by_key.entry(key).or_default(), s);
+    }
+    for s in power_series {
+        let key = series_key(&s, ctx.spec);
+        merge_into(&mut power_by_key.entry(key).or_default(), s);
     }
 
     // 稳定排序：按 key 升序输出，避免 HashMap 随机序。
@@ -203,9 +225,24 @@ pub async fn collect_device(
             .as_ref()
             .map_or((None, None, None, None, None, None), |m| stat3(&m.points));
 
+        // 温度/功率：按 key 从独立分组中取
+        let temp_opt = temp_by_key.get(&key).and_then(|o| o.as_ref());
+        let (t_avg, t_peak, t_peak_t, t_count, t_first, t_last) =
+            temp_opt.map_or((None, None, None, None, None, None), |s| stat3(&s.points));
+        let power_opt = power_by_key.get(&key).and_then(|o| o.as_ref());
+        let (p_avg, p_peak, p_peak_t, p_count, p_first, p_last) =
+            power_opt.map_or((None, None, None, None, None, None), |s| stat3(&s.points));
+
         // 归属
-        let (namespace, pod, container) =
-            ownership_for(&mut ctx, mode, &host_ip, &card_id, core.as_ref(), mem.as_ref()).await;
+        let (namespace, pod, container) = ownership_for(
+            &mut ctx,
+            mode,
+            &host_ip,
+            &card_id,
+            core.as_ref(),
+            mem.as_ref(),
+        )
+        .await;
 
         ctx.out.records.push(CardRecord {
             source_name: source_name.into(),
@@ -228,6 +265,24 @@ pub async fn collect_device(
             mem_count: m_count,
             mem_first_time: m_first,
             mem_last_time: m_last,
+            temp_avg: t_avg,
+            temp_peak: t_peak,
+            temp_peak_time: t_peak_t,
+            temp_count: t_count,
+            temp_first_time: t_first,
+            temp_last_time: t_last,
+            power_avg: p_avg,
+            power_peak: p_peak,
+            power_peak_time: p_peak_t,
+            power_count: p_count,
+            power_first_time: p_first,
+            power_last_time: p_last,
+            host_cpu_avg: None,
+            host_cpu_peak: None,
+            host_cpu_peak_time: None,
+            host_mem_avg: None,
+            host_mem_peak: None,
+            host_mem_peak_time: None,
             range_start: ctx.start,
             range_end: ctx.end,
         });
@@ -290,9 +345,7 @@ async fn fallback_used_total_inner(
     depth: usize,
 ) -> Vec<Series> {
     if depth > MAX_FALLBACK_DEPTH {
-        tracing::warn!(
-            "fallback 嵌套深度超过 {MAX_FALLBACK_DEPTH} 层，中止递归以避免栈溢出"
-        );
+        tracing::warn!("fallback 嵌套深度超过 {MAX_FALLBACK_DEPTH} 层，中止递归以避免栈溢出");
         return Vec::new();
     }
     match fallback {
@@ -461,7 +514,11 @@ async fn query_with_ip_fallback(
         ip_label = ctx.spec.labels.host_ip,
         ip = ip_escaped
     );
-    match ctx.fetcher.query_range(&promql, ctx.start, ctx.end, ctx.step).await {
+    match ctx
+        .fetcher
+        .query_range(&promql, ctx.start, ctx.end, ctx.step)
+        .await
+    {
         Ok(series) if !series.is_empty() => Some(series),
         _ => {
             // 回退：用 instance 标签（IP 可能从 instance 解析而来）。
@@ -482,7 +539,11 @@ async fn query_with_ip_fallback(
                 v = escaped_card_id,
                 ip_re = ip_regex
             );
-            match ctx.fetcher.query_range(&instance_promql, ctx.start, ctx.end, ctx.step).await {
+            match ctx
+                .fetcher
+                .query_range(&instance_promql, ctx.start, ctx.end, ctx.step)
+                .await
+            {
                 Ok(series) if !series.is_empty() => Some(series),
                 _ => None,
             }
@@ -541,8 +602,14 @@ async fn ownership_for(
     let ip_escaped = escape_promql_label_value(host_ip);
 
     // 优先用核心指标查归属，含 instance 标签回退
-    if let Some(series) =
-        query_with_ip_fallback(ctx, &ctx.spec.core_util_metric, &escaped, &ip_escaped, host_ip).await
+    if let Some(series) = query_with_ip_fallback(
+        ctx,
+        &ctx.spec.core_util_metric,
+        &escaped,
+        &ip_escaped,
+        host_ip,
+    )
+    .await
     {
         let ns = last_label_value(&series, &ctx.spec.labels.namespace);
         let pod = last_label_value(&series, &ctx.spec.labels.pod);
@@ -655,10 +722,13 @@ pub(crate) fn extract_ip(labels: &HashMap<String, String>, prefer: &str) -> Stri
 ///
 /// 转义所有正则元字符，使字符串在 `=~` 匹配中被当作字面量。
 /// Prometheus 使用 RE2 引擎，元字符为：`\ . ^ $ * + ? ( ) [ ] { } |`
-fn escape_promql_regex(s: &str) -> String {
+pub fn escape_promql_regex(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if matches!(c, '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|') {
+        if matches!(
+            c,
+            '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+        ) {
             out.push('\\');
         }
         out.push(c);
@@ -727,6 +797,8 @@ mod tests {
                 pod: "p".into(),
                 namespace: "n".into(),
             },
+            temp_metric: None,
+            power_metric: None,
         };
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -907,11 +979,19 @@ mod tests {
         ];
         let mem_direct: Vec<Series> = Vec::new(); // 触发 fallback 走 total
         let used = vec![Series {
-            labels: labels(&[("__name__", "hbm_used"), ("id", "0"), ("host_ip", "1.1.1.1")]),
+            labels: labels(&[
+                ("__name__", "hbm_used"),
+                ("id", "0"),
+                ("host_ip", "1.1.1.1"),
+            ]),
             points: vec![(t(0), 50.0)],
         }];
         let total = vec![Series {
-            labels: labels(&[("__name__", "hbm_total"), ("id", "0"), ("host_ip", "1.1.1.1")]),
+            labels: labels(&[
+                ("__name__", "hbm_total"),
+                ("id", "0"),
+                ("host_ip", "1.1.1.1"),
+            ]),
             points: vec![(t(0), 200.0)],
         }];
         let fetcher = MockFetcher::new()
@@ -997,10 +1077,7 @@ mod tests {
         let merged = slot.unwrap();
         assert_eq!(merged.points.len(), 3, "去重后应剩 3 个点");
         assert_eq!(merged.points[0], (t(0), 10.0));
-        assert_eq!(
-            merged.points[1], (t(60), 99.0),
-            "同一时间戳应保留后者的值"
-        );
+        assert_eq!(merged.points[1], (t(60), 99.0), "同一时间戳应保留后者的值");
         assert_eq!(merged.points[2], (t(120), 30.0));
     }
 
@@ -1049,11 +1126,7 @@ mod tests {
         // core 有 namespace 但缺 pod/container，mem 有全部归属字段 →
         // namespace 从 core 取，pod/container 从 mem 取（逐字段回退）。
         let core = vec![Series {
-            labels: labels(&[
-                ("gpu", "0"),
-                ("ip", "1.1.1.1"),
-                ("namespace", "ns-core"),
-            ]),
+            labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1"), ("namespace", "ns-core")]),
             points: vec![(t(0), 10.0)],
         }];
         let mem = vec![Series {
@@ -1109,7 +1182,7 @@ mod tests {
         }];
         let fetcher = MockFetcher::new()
             .when("DCGM_FI_DEV_GPU_UTIL", Ok(vec![])) // 核心无数据
-            .when("ignoring(__name__)", Ok(mem_series.clone()))      // 显存复合查询
+            .when("ignoring(__name__)", Ok(mem_series.clone())) // 显存复合查询
             .when("DCGM_FI_DEV_FB_USED", Ok(mem_series)); // 归属回退查询 used 指标
         let spec = crate::devices::nvidia_a10_spec();
         let cfg = cfg_with_mode("last_in_range");
@@ -1135,26 +1208,20 @@ mod tests {
 
     #[test]
     fn extract_ip_strips_ipv6_brackets() {
-        let labels = HashMap::from([
-            ("instance".into(), "[::1]:9090".into()),
-        ]);
+        let labels = HashMap::from([("instance".into(), "[::1]:9090".into())]);
         assert_eq!(extract_ip(&labels, "ip"), "::1", "应剥去 IPv6 方括号");
     }
 
     #[test]
     fn extract_ip_strips_ipv6_full_brackets() {
-        let labels = HashMap::from([
-            ("instance".into(), "[2001:db8::1]:9090".into()),
-        ]);
+        let labels = HashMap::from([("instance".into(), "[2001:db8::1]:9090".into())]);
         assert_eq!(extract_ip(&labels, "ip"), "2001:db8::1");
     }
 
     #[test]
     fn extract_ip_bare_ipv6_no_port_unchanged() {
         // 裸 IPv6 无端口 → rsplit_once(':') 后 port 含非数字 → 不剥，原样返回
-        let labels = HashMap::from([
-            ("instance".into(), "2001:db8::1".into()),
-        ]);
+        let labels = HashMap::from([("instance".into(), "2001:db8::1".into())]);
         assert_eq!(extract_ip(&labels, "ip"), "2001:db8::1");
     }
 
@@ -1193,7 +1260,10 @@ mod tests {
         )
         .await;
         let r = &out.records[0];
-        assert_eq!(r.node_name, "my-node", "node_name 应取自 spec.labels.node_name 指定的标签");
+        assert_eq!(
+            r.node_name, "my-node",
+            "node_name 应取自 spec.labels.node_name 指定的标签"
+        );
     }
 
     #[tokio::test]
@@ -1208,8 +1278,7 @@ mod tests {
             ]),
             points: vec![(t(0), 10.0)],
         }];
-        let fetcher = MockFetcher::new()
-            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core));
+        let fetcher = MockFetcher::new().when("DCGM_FI_DEV_GPU_UTIL", Ok(core));
         let mut spec = crate::devices::nvidia_a10_spec();
         spec.labels.host_ip = "host_address".into(); // 配置为 "host_address"
         let cfg = cfg_with_mode("instant");
@@ -1224,7 +1293,10 @@ mod tests {
         )
         .await;
         let r = &out.records[0];
-        assert_eq!(r.host_ip, "10.0.0.5", "host_ip 应取自 spec.labels.host_ip 指定的标签");
+        assert_eq!(
+            r.host_ip, "10.0.0.5",
+            "host_ip 应取自 spec.labels.host_ip 指定的标签"
+        );
     }
 
     #[tokio::test]
@@ -1234,8 +1306,7 @@ mod tests {
             labels: labels(&[("gpu", "0"), ("ip", "1.1.1.1")]),
             points: vec![(t(0), 10.0)],
         }];
-        let fetcher = MockFetcher::new()
-            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core));
+        let fetcher = MockFetcher::new().when("DCGM_FI_DEV_GPU_UTIL", Ok(core));
         let spec = crate::devices::nvidia_a10_spec(); // labels.node_name = "node"
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -1275,10 +1346,7 @@ mod tests {
             points: vec![(t(60), 30.0)],
         }];
         // 核心查询（首次注册，按子串首次命中）：两条 series 都返回用于聚合
-        let core_series = vec![
-            host_a_series[0].clone(),
-            host_b_series[0].clone(),
-        ];
+        let core_series = vec![host_a_series[0].clone(), host_b_series[0].clone()];
         let fetcher = MockFetcher::new()
             // 归属查询带 host_ip="1.1.1.1" → 匹配此注册（更具体的子串先注册）
             .when(r#"host_ip="1.1.1.1""#, Ok(host_a_series))
@@ -1299,9 +1367,20 @@ mod tests {
         )
         .await;
         assert_eq!(out.records.len(), 2, "应产出 2 张卡（2 台主机各 1 张）");
-        let a = out.records.iter().find(|r| r.host_ip == "1.1.1.1").expect("应有主机 A");
-        let b = out.records.iter().find(|r| r.host_ip == "2.2.2.2").expect("应有主机 B");
-        assert_eq!(a.pod, "pod-a", "主机 A 的卡应归属 pod-a（不应被主机 B 的 pod-b 污染）");
+        let a = out
+            .records
+            .iter()
+            .find(|r| r.host_ip == "1.1.1.1")
+            .expect("应有主机 A");
+        let b = out
+            .records
+            .iter()
+            .find(|r| r.host_ip == "2.2.2.2")
+            .expect("应有主机 B");
+        assert_eq!(
+            a.pod, "pod-a",
+            "主机 A 的卡应归属 pod-a（不应被主机 B 的 pod-b 污染）"
+        );
         assert_eq!(b.pod, "pod-b", "主机 B 的卡应归属 pod-b");
     }
 
@@ -1390,7 +1469,10 @@ mod tests {
             core_util_metric: "custom_core_util".into(),
             memory: MemoryStrategy::direct(
                 "custom_hbm_direct",
-                Some(MemoryStrategy::composite_ratio("custom_hbm_used", "custom_hbm_free")),
+                Some(MemoryStrategy::composite_ratio(
+                    "custom_hbm_used",
+                    "custom_hbm_free",
+                )),
             ),
             card_id_label: "gpu".into(),
             labels: crate::devices::LabelMapping {
@@ -1400,6 +1482,8 @@ mod tests {
                 pod: "p".into(),
                 namespace: "n".into(),
             },
+            temp_metric: None,
+            power_metric: None,
         };
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -1415,7 +1499,10 @@ mod tests {
         assert_eq!(out.records.len(), 1, "应产出 1 张卡");
         let r = &out.records[0];
         // 30/(30+170)*100 = 15, 60/(60+240)*100 = 20 → avg=17.5, peak=20
-        assert!(r.mem_avg.is_some(), "显存不应为 N/A（CompositeRatio fallback 应生效）");
+        assert!(
+            r.mem_avg.is_some(),
+            "显存不应为 N/A（CompositeRatio fallback 应生效）"
+        );
         assert!((r.mem_avg.unwrap() - 17.5).abs() < 1e-9);
         assert!((r.mem_peak.unwrap() - 20.0).abs() < 1e-9);
     }
@@ -1451,7 +1538,9 @@ mod tests {
         )
         .await;
         assert!(
-            out.warnings.iter().any(|w| w.contains("used") && w.contains("total")),
+            out.warnings
+                .iter()
+                .any(|w| w.contains("used") && w.contains("total")),
             "有 used 无 total 时应发 Warning，实际：{:?}",
             out.warnings
         );
@@ -1465,7 +1554,10 @@ mod tests {
         assert_eq!(escape_promql_label_value(r#"back\slash"#), r#"back\\slash"#);
         assert_eq!(escape_promql_label_value(r#""quoted""#), r#"\"quoted\""#);
         assert_eq!(escape_promql_label_value("new\nline"), r#"new\nline"#);
-        assert_eq!(escape_promql_label_value("carriage\rreturn"), r#"carriage\rreturn"#);
+        assert_eq!(
+            escape_promql_label_value("carriage\rreturn"),
+            r#"carriage\rreturn"#
+        );
         assert_eq!(escape_promql_label_value("tab\there"), r#"tab\there"#);
     }
 

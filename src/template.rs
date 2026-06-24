@@ -50,7 +50,10 @@ pub fn render_template(template: &str, ctx: &TemplateContext) -> String {
         ("{{start_hour}}", start_local.format("%H").to_string()),
         ("{{start_minute}}", start_local.format("%M").to_string()),
         ("{{start_second}}", start_local.format("%S").to_string()),
-        ("{{start}}", start_local.format("%Y-%m-%d_%H-%M-%S").to_string()),
+        (
+            "{{start}}",
+            start_local.format("%Y-%m-%d_%H-%M-%S").to_string(),
+        ),
         // end
         ("{{end_date}}", end_local.format("%Y-%m-%d").to_string()),
         ("{{end_time}}", end_local.format("%H-%M-%S").to_string()),

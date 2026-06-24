@@ -6,9 +6,10 @@
 
 use gpu_npu_util_reporter::config;
 use gpu_npu_util_reporter::error::AppError;
-use gpu_npu_util_reporter::fetcher::PrometheusFetcher;
+use gpu_npu_util_reporter::fetcher::{MetricFetcher, PrometheusFetcher};
 use gpu_npu_util_reporter::logging;
 use gpu_npu_util_reporter::mapper;
+use gpu_npu_util_reporter::mapper::ColumnFlags;
 use gpu_npu_util_reporter::pipeline;
 use gpu_npu_util_reporter::processor::CardRecord;
 use gpu_npu_util_reporter::reporter;
@@ -149,9 +150,12 @@ async fn main() -> ExitCode {
         info!("日志文件路径：{log_file_path}");
     }
 
-    let step = Duration::try_seconds(cfg.report.query_step_secs.cast_signed())
-        .unwrap_or_else(|| {
-            error!("query_step_secs 过大（{}），使用默认 60 秒", cfg.report.query_step_secs);
+    let step =
+        Duration::try_seconds(cfg.report.query_step_secs.cast_signed()).unwrap_or_else(|| {
+            error!(
+                "query_step_secs 过大（{}），使用默认 60 秒",
+                cfg.report.query_step_secs
+            );
             Duration::seconds(60)
         });
 
@@ -159,16 +163,17 @@ async fn main() -> ExitCode {
     let mut warnings: Vec<String> = Vec::new();
     let mut records: Vec<CardRecord> = Vec::new();
     for src in &cfg.sources {
-        info!("开始采集数据源「{}」（{}）", src.name, AppError::redact_url(&src.url));
+        info!(
+            "开始采集数据源「{}」（{}）",
+            src.name,
+            AppError::redact_url(&src.url)
+        );
         let fetcher = PrometheusFetcher::new(src.name.clone(), src.url.clone(), src.timeout_secs);
         for dt_key in &src.device_types {
             let spec = if let Some(s) = cfg.devices.get(dt_key) {
                 s.clone()
             } else {
-                let msg = format!(
-                    "数据源 {} 引用了未定义的设备类型 {}",
-                    src.name, dt_key
-                );
+                let msg = format!("数据源 {} 引用了未定义的设备类型 {}", src.name, dt_key);
                 warn!("{msg}");
                 warnings.push(msg);
                 continue;
@@ -190,6 +195,126 @@ async fn main() -> ExitCode {
         info!("数据源「{}」采集完成", src.name);
     }
     info!("全部采集完成，共 {} 条记录", records.len());
+
+    // 5.5. 主机指标采集（可选，通用指标）
+    let mut column_flags = ColumnFlags::default();
+    // 检查是否有设备配置了温度/功率指标
+    for spec in cfg.devices.values() {
+        if spec.temp_metric.is_some() {
+            column_flags.has_temp = true;
+        }
+        if spec.power_metric.is_some() {
+            column_flags.has_power = true;
+        }
+    }
+    if let Some(hm) = &cfg.host_metrics {
+        if hm.enabled {
+            column_flags.has_host_cpu = true;
+            column_flags.has_host_mem = true;
+
+            // 确定使用哪个数据源
+            let host_source = if let Some(ref name) = hm.source {
+                cfg.sources.iter().find(|s| &s.name == name)
+            } else {
+                cfg.sources.first()
+            };
+            if let Some(host_src) = host_source {
+                info!("开始采集主机指标（数据源「{}」）", host_src.name);
+                let host_fetcher = PrometheusFetcher::new(
+                    host_src.name.clone(),
+                    host_src.url.clone(),
+                    host_src.timeout_secs,
+                );
+
+                // 收集唯一的主机 IP
+                let mut host_ips: Vec<String> = records
+                    .iter()
+                    .map(|r| r.host_ip.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                host_ips.sort();
+
+                for ip in &host_ips {
+                    if ip.is_empty() {
+                        continue;
+                    }
+                    let escaped_ip = pipeline::escape_promql_regex(ip);
+                    let label_filter = format!("{}=~\"^{}.*\"", hm.host_label, escaped_ip);
+
+                    // 查询 CPU 利用率
+                    let cpu_promql = format!("{}{{{}}}", hm.cpu_metric, label_filter);
+                    let (cpu_avg, cpu_peak, cpu_peak_t) = match host_fetcher
+                        .query_range(&cpu_promql, start, end, step)
+                        .await
+                    {
+                        Ok(series) => {
+                            // 合并所有 series 的点
+                            let mut all_points: Vec<(chrono::DateTime<chrono::Utc>, f64)> =
+                                series.iter().flat_map(|s| s.points.clone()).collect();
+                            all_points.sort_by_key(|(ts, _)| *ts);
+                            all_points.dedup_by_key(|(ts, _)| *ts);
+                            if let Some(stats) =
+                                gpu_npu_util_reporter::processor::aggregate(&all_points)
+                            {
+                                (Some(stats.avg), Some(stats.peak), Some(stats.peak_time))
+                            } else {
+                                (None, None, None)
+                            }
+                        }
+                        Err(e) => {
+                            warn!("主机 {} CPU 指标查询失败：{e}", ip);
+                            (None, None, None)
+                        }
+                    };
+
+                    // 查询内存利用率
+                    let mem_promql = format!("{}{{{}}}", hm.mem_metric, label_filter);
+                    let (mem_avg, mem_peak, mem_peak_t) = match host_fetcher
+                        .query_range(&mem_promql, start, end, step)
+                        .await
+                    {
+                        Ok(series) => {
+                            let mut all_points: Vec<(chrono::DateTime<chrono::Utc>, f64)> =
+                                series.iter().flat_map(|s| s.points.clone()).collect();
+                            all_points.sort_by_key(|(ts, _)| *ts);
+                            all_points.dedup_by_key(|(ts, _)| *ts);
+                            if let Some(stats) =
+                                gpu_npu_util_reporter::processor::aggregate(&all_points)
+                            {
+                                (Some(stats.avg), Some(stats.peak), Some(stats.peak_time))
+                            } else {
+                                (None, None, None)
+                            }
+                        }
+                        Err(e) => {
+                            warn!("主机 {} 内存指标查询失败：{e}", ip);
+                            (None, None, None)
+                        }
+                    };
+
+                    // 填入该主机下所有卡记录
+                    for rec in &mut records {
+                        if rec.host_ip == *ip {
+                            rec.host_cpu_avg = cpu_avg;
+                            rec.host_cpu_peak = cpu_peak;
+                            rec.host_cpu_peak_time = cpu_peak_t;
+                            rec.host_mem_avg = mem_avg;
+                            rec.host_mem_peak = mem_peak;
+                            rec.host_mem_peak_time = mem_peak_t;
+                        }
+                    }
+                }
+                info!("主机指标采集完成（{} 台主机）", host_ips.len());
+            } else {
+                warn!("主机指标已启用但未找到匹配的数据源，跳过主机指标采集");
+            }
+        }
+    }
+
+    // 构建动态基础列（含可选指标组）
+    let base_columns = mapper::build_base_columns(column_flags);
+    let base_column_refs: Vec<&str> = base_columns.iter().map(String::as_str).collect();
 
     // 6. 渲染前稳定排序（I1）：必须在资产映射之前，保证 mapping_values 的行索引
     //    与最终输出顺序一致。按 (source_name, host_ip, card_id) 升序。
@@ -230,7 +355,11 @@ async fn main() -> ExitCode {
                                 mapping_values.insert((i, rename), val);
                             }
                         }
-                        info!("资产映射完成（{}）：{joined_count}/{} 行命中", src.source_path, records.len());
+                        info!(
+                            "资产映射完成（{}）：{joined_count}/{} 行命中",
+                            src.source_path,
+                            records.len()
+                        );
                     }
                     Err(e) => {
                         warn!("{e}");
@@ -240,7 +369,7 @@ async fn main() -> ExitCode {
             }
             // PRD §2.3：缺失锚点（非基础列）应记 Warning。
             warnings.extend(mapper::missing_anchor_warnings(
-                mapper::BASE_COLUMNS,
+                &base_column_refs,
                 &all_cols,
             ));
             all_cols
@@ -256,7 +385,7 @@ async fn main() -> ExitCode {
     // 8. 渲染
     info!("开始渲染报表");
     let spec = reporter::ReportSpec {
-        base_columns: mapper::BASE_COLUMNS.iter().map(ToString::to_string).collect(),
+        base_columns: base_columns.clone(),
         mapping_renames: mapping_columns.iter().map(|c| c.rename.clone()).collect(),
     };
     match reporter::render_to_buffer(
@@ -280,7 +409,11 @@ async fn main() -> ExitCode {
                 error!("报表写入失败：{e}");
                 return ExitCode::from(1);
             }
-            info!("报表已生成：{output_path}（{} 条记录，{} 字节）", records.len(), std::fs::metadata(&output_path).map_or(0, |m| m.len()));
+            info!(
+                "报表已生成：{output_path}（{} 条记录，{} 字节）",
+                records.len(),
+                std::fs::metadata(&output_path).map_or(0, |m| m.len())
+            );
         }
         Err(e) => {
             error!("{e}");
@@ -306,6 +439,11 @@ fn resolve_time(
     end: Option<DateTime<Utc>>,
     tz: chrono_tz::Tz,
 ) -> Result<DateTime<Utc>, AppError> {
-    let ctx = time_expr::TimeContext { now, start, end, tz };
+    let ctx = time_expr::TimeContext {
+        now,
+        start,
+        end,
+        tz,
+    };
     time_expr::resolve_time_expr(s, &ctx)
 }

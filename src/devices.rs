@@ -168,6 +168,12 @@ pub struct DeviceSpec {
     pub card_id_label: String,
     /// 归属标签映射。
     pub labels: LabelMapping,
+    /// 设备温度指标名（可选，如 `DCGM_FI_DEV_GPU_TEMP`）。
+    #[serde(default)]
+    pub temp_metric: Option<String>,
+    /// 设备功率指标名（可选，如 `DCGM_FI_DEV_POWER_USAGE`）。
+    #[serde(default)]
+    pub power_metric: Option<String>,
 }
 
 /// NVIDIA A10 预设配方（基于 DCGM Exporter）。
@@ -185,6 +191,8 @@ pub fn nvidia_a10_spec() -> DeviceSpec {
             pod: "pod".into(),
             namespace: "namespace".into(),
         },
+        temp_metric: Some("DCGM_FI_DEV_GPU_TEMP".into()),
+        power_metric: Some("DCGM_FI_DEV_POWER_USAGE".into()),
     }
 }
 
@@ -212,6 +220,8 @@ pub fn ascend_910b_spec() -> DeviceSpec {
             pod: "pod_name".into(),
             namespace: "namespace".into(),
         },
+        temp_metric: Some("npu_chip_info_temperature".into()),
+        power_metric: Some("npu_chip_info_power".into()),
     }
 }
 

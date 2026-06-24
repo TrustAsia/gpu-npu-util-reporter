@@ -78,10 +78,7 @@ pub fn resolve_time_expr(expr: &str, ctx: &TimeContext) -> Result<DateTime<Utc>,
             }
             chrono::LocalResult::None => {
                 return Err(AppError::TimeFormat {
-                    raw: format!(
-                        "「{trimmed}」在时区 {} 中不存在（夏令时前进跳变）",
-                        ctx.tz
-                    ),
+                    raw: format!("「{trimmed}」在时区 {} 中不存在（夏令时前进跳变）", ctx.tz),
                 })
             }
         });
@@ -105,9 +102,10 @@ pub fn resolve_time_expr(expr: &str, ctx: &TimeContext) -> Result<DateTime<Utc>,
         return Ok(base);
     }
     let offset = parse_offset(rest)?;
-    base.checked_add_signed(offset).ok_or_else(|| AppError::TimeFormat {
-        raw: format!("时间计算溢出：「{trimmed}」偏移量超出可表示范围"),
-    })
+    base.checked_add_signed(offset)
+        .ok_or_else(|| AppError::TimeFormat {
+            raw: format!("时间计算溢出：「{trimmed}」偏移量超出可表示范围"),
+        })
 }
 
 /// 解析锚点关键字，返回 (`anchor_name`, 剩余部分)。
@@ -212,9 +210,12 @@ fn parse_offset(s: &str) -> Result<Duration, AppError> {
     }
     let result = if sign < 0 {
         // -total 对 i64::MIN 秒会溢出，用 try_seconds 安全构造
-        let neg_secs = total.num_seconds().checked_neg().ok_or_else(|| AppError::TimeFormat {
-            raw: format!("偏移量过大（{s}），取反溢出"),
-        })?;
+        let neg_secs = total
+            .num_seconds()
+            .checked_neg()
+            .ok_or_else(|| AppError::TimeFormat {
+                raw: format!("偏移量过大（{s}），取反溢出"),
+            })?;
         Duration::try_seconds(neg_secs).ok_or_else(|| AppError::TimeFormat {
             raw: format!("偏移量过大（{s}），取反溢出"),
         })?
@@ -250,15 +251,14 @@ mod tests {
         TimeContext {
             now: Utc.timestamp_opt(1_719_200_000, 0).unwrap(), // 2024-06-24 08:53:20 UTC
             start: Some(Utc.timestamp_opt(1_719_158_400, 0).unwrap()), // 2024-06-23 21:00:00
-            end: Some(Utc.timestamp_opt(1_719_244_800, 0).unwrap()),   // 2024-06-24 21:00:00
+            end: Some(Utc.timestamp_opt(1_719_244_800, 0).unwrap()), // 2024-06-24 21:00:00
             tz: "UTC".parse().unwrap(),
         }
     }
 
     #[test]
     fn absolute_time_parsed_directly() {
-        let result =
-            resolve_time_expr("2026-06-18 00:00:00", &TimeContext::default()).unwrap();
+        let result = resolve_time_expr("2026-06-18 00:00:00", &TimeContext::default()).unwrap();
         assert_eq!(
             result.format("%Y-%m-%d %H:%M:%S").to_string(),
             "2026-06-18 00:00:00"
@@ -334,7 +334,10 @@ mod tests {
         assert!(!is_relative_time("yesterday"));
         // 严格检查：锚点后必须紧跟 +、- 或结束，不应误判
         assert!(!is_relative_time("nowhere"), "nowhere 不应被判为相对时间");
-        assert!(!is_relative_time("starting_point"), "starting_point 不应被判为相对时间");
+        assert!(
+            !is_relative_time("starting_point"),
+            "starting_point 不应被判为相对时间"
+        );
         assert!(!is_relative_time("endgame"), "endgame 不应被判为相对时间");
     }
 

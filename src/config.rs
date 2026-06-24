@@ -111,6 +111,32 @@ fn default_log_path() -> String {
     "./logs/{{now}}.log".into()
 }
 
+/// 主机指标采集配置（通用指标，不绑定设备类型）。
+///
+/// 启用后对每个唯一的主机 IP 查询 CPU/内存利用率，
+/// 结果填入该主机下所有计算卡行。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostMetricsConfig {
+    /// 是否启用主机指标采集。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 指定从哪个数据源查询主机指标（按 name 匹配）；不指定时使用第一个数据源。
+    #[serde(default)]
+    pub source: Option<String>,
+    /// CPU 利用率 Prometheus 指标名。
+    pub cpu_metric: String,
+    /// 内存利用率 Prometheus 指标名。
+    pub mem_metric: String,
+    /// Prometheus 标签名，用于匹配主机 IP（默认 "instance"）。
+    #[serde(default = "default_host_label")]
+    pub host_label: String,
+}
+
+fn default_host_label() -> String {
+    "instance".into()
+}
+
 /// 报表输出配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -148,6 +174,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub log: LogConfig,
     pub report: ReportConfig,
+    /// 主机指标采集配置（可选）。
+    #[serde(default)]
+    pub host_metrics: Option<HostMetricsConfig>,
 }
 
 fn default_timezone() -> String {
@@ -224,14 +253,42 @@ mapping:
 #     threshold: 10
 #     color: "#FFA500"   # 低于阈值染橙（闲置）
 thresholds:
-  core_avg_above:    null
-  core_avg_below:    null
-  core_peak_above:   null
-  core_peak_below:   null
-  mem_avg_above:     null
-  mem_avg_below:     null
-  mem_peak_above:    null
-  mem_peak_below:    null
+  core_avg_above:      null
+  core_avg_below:      null
+  core_peak_above:     null
+  core_peak_below:     null
+  mem_avg_above:       null
+  mem_avg_below:       null
+  mem_peak_above:      null
+  mem_peak_below:      null
+  temp_avg_above:      null
+  temp_avg_below:      null
+  temp_peak_above:     null
+  temp_peak_below:     null
+  power_avg_above:     null
+  power_avg_below:     null
+  power_peak_above:    null
+  power_peak_below:    null
+  host_cpu_avg_above:  null
+  host_cpu_avg_below:  null
+  host_cpu_peak_above: null
+  host_cpu_peak_below: null
+  host_mem_avg_above:  null
+  host_mem_avg_below:  null
+  host_mem_peak_above: null
+  host_mem_peak_below: null
+
+# 主机指标采集（可选，通用指标，不绑定设备类型）
+# 启用后对每个唯一的主机 IP 查询 CPU/内存利用率，
+# 结果填入该主机下所有计算卡行。
+# source 可选：指定从哪个数据源查询（按 name 匹配），不指定使用第一个数据源。
+# host_label 可选：Prometheus 标签名用于匹配主机 IP（默认 instance）。
+# host_metrics:
+#   enabled: false
+#   source: "prod-cluster"
+#   cpu_metric: "node_cpu_utilization"
+#   mem_metric: "node_memory_utilization"
+#   host_label: "instance"
 
 # 日志配置
 # console_level: 控制台日志级别（trace/debug/info/warn/error）
@@ -431,6 +488,27 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
         }
         // 校验显存策略中的指标名
         validate_memory_metrics(&spec.memory, key, path)?;
+        // 校验温度/功率指标名（可选）
+        if let Some(tm) = &spec.temp_metric {
+            if !is_valid_metric_name(tm) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "devices.{key}.temp_metric「{tm}」不是合法的 Prometheus 指标名"
+                    ),
+                });
+            }
+        }
+        if let Some(pm) = &spec.power_metric {
+            if !is_valid_metric_name(pm) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "devices.{key}.power_metric「{pm}」不是合法的 Prometheus 指标名"
+                    ),
+                });
+            }
+        }
     }
     // 校验 sources[].device_types 引用的设备类型在 devices 中存在
     for src in &cfg.sources {
@@ -446,41 +524,83 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             }
         }
     }
+    // 校验主机指标配置
+    if let Some(hm) = &cfg.host_metrics {
+        if hm.enabled {
+            if !is_valid_metric_name(&hm.cpu_metric) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "host_metrics.cpu_metric「{}」不是合法的 Prometheus 指标名",
+                        hm.cpu_metric
+                    ),
+                });
+            }
+            if !is_valid_metric_name(&hm.mem_metric) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "host_metrics.mem_metric「{}」不是合法的 Prometheus 指标名",
+                        hm.mem_metric
+                    ),
+                });
+            }
+            if !is_valid_label_name(&hm.host_label) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "host_metrics.host_label「{}」不是合法的 Prometheus 标签名",
+                        hm.host_label
+                    ),
+                });
+            }
+            // 校验 source 引用的数据源存在
+            if let Some(ref src_name) = hm.source {
+                if !cfg.sources.iter().any(|s| &s.name == src_name) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!("host_metrics.source「{src_name}」引用了未定义的数据源"),
+                    });
+                }
+            }
+        }
+    }
+
     // 校验映射配置中的 record_key / match_keys 字段名合法性
     // 仅在 mapping.enabled=true 时校验；disabled 的映射不应阻断配置加载
     if let Some(mapping) = &cfg.mapping {
         if mapping.enabled {
             for src in &mapping.sources {
-            if src.match_keys.is_empty() {
-                return Err(AppError::Config {
-                    path: path.into(),
-                    reason: format!(
-                        "映射来源「{}」的 match_keys 不能为空字符串",
-                        src.source_path
-                    ),
-                });
-            }
-            let card_record_field = src.record_key.as_deref().unwrap_or(&src.match_keys);
-            if !crate::mapper::KNOWN_CARD_RECORD_FIELDS.contains(&card_record_field) {
-                return Err(AppError::Config {
-                    path: path.into(),
-                    reason: format!(
+                if src.match_keys.is_empty() {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "映射来源「{}」的 match_keys 不能为空字符串",
+                            src.source_path
+                        ),
+                    });
+                }
+                let card_record_field = src.record_key.as_deref().unwrap_or(&src.match_keys);
+                if !crate::mapper::KNOWN_CARD_RECORD_FIELDS.contains(&card_record_field) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
                         "映射来源「{}」的 CardRecord 字段名「{}」不在已知字段列表中（支持：{}）",
                         src.source_path,
                         card_record_field,
                         crate::mapper::KNOWN_CARD_RECORD_FIELDS.join(", ")
                     ),
+                    });
+                }
+            }
+            // 检测映射列 rename 重复
+            let dup_warnings = mapping.duplicate_rename_warnings();
+            if let Some(first) = dup_warnings.first() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: first.clone(),
                 });
             }
-        }
-        // 检测映射列 rename 重复
-        let dup_warnings = mapping.duplicate_rename_warnings();
-        if let Some(first) = dup_warnings.first() {
-            return Err(AppError::Config {
-                path: path.into(),
-                reason: first.clone(),
-            });
-        }
         }
     }
     Ok(())
@@ -544,9 +664,7 @@ fn validate_memory_metrics_inner(
                 if !is_valid_metric_name(name) {
                     return Err(AppError::Config {
                         path: path.into(),
-                        reason: format!(
-                            "devices.{device_key}.memory 指标名「{name}」不合法"
-                        ),
+                        reason: format!("devices.{device_key}.memory 指标名「{name}」不合法"),
                     });
                 }
             }
@@ -742,21 +860,30 @@ mod tests {
     fn config_rejects_zero_timeout() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.sources[0].timeout_secs = 0;
-        assert!(validate_config(&cfg, "test.yaml").is_err(), "timeout_secs=0 应被拒绝");
+        assert!(
+            validate_config(&cfg, "test.yaml").is_err(),
+            "timeout_secs=0 应被拒绝"
+        );
     }
 
     #[test]
     fn config_rejects_oversized_query_step() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.report.query_step_secs = u64::MAX;
-        assert!(validate_config(&cfg, "test.yaml").is_err(), "超大 query_step_secs 应被拒绝");
+        assert!(
+            validate_config(&cfg, "test.yaml").is_err(),
+            "超大 query_step_secs 应被拒绝"
+        );
     }
 
     #[test]
     fn config_rejects_empty_sources() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.sources.clear();
-        assert!(validate_config(&cfg, "test.yaml").is_err(), "空 sources 应被拒绝");
+        assert!(
+            validate_config(&cfg, "test.yaml").is_err(),
+            "空 sources 应被拒绝"
+        );
     }
 
     #[test]
@@ -766,17 +893,17 @@ mod tests {
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "无协议前缀的 URL 应被拒绝");
         let msg = format!("{}", r.unwrap_err());
-        assert!(msg.contains("http://") || msg.contains("https://"), "提示应含协议要求");
+        assert!(
+            msg.contains("http://") || msg.contains("https://"),
+            "提示应含协议要求"
+        );
     }
 
     #[test]
     fn config_rejects_invalid_metric_name() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         // 注入含 PromQL 特殊字符的指标名
-        cfg.devices
-            .get_mut("nvidia_a10")
-            .unwrap()
-            .core_util_metric = "metric{evil=\"yes\"}".into();
+        cfg.devices.get_mut("nvidia_a10").unwrap().core_util_metric = "metric{evil=\"yes\"}".into();
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "含特殊字符的指标名应被拒绝");
     }
@@ -784,10 +911,7 @@ mod tests {
     #[test]
     fn config_rejects_invalid_label_name() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
-        cfg.devices
-            .get_mut("nvidia_a10")
-            .unwrap()
-            .card_id_label = "gpu\",foo=\"bar".into();
+        cfg.devices.get_mut("nvidia_a10").unwrap().card_id_label = "gpu\",foo=\"bar".into();
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "含特殊字符的标签名应被拒绝");
     }
@@ -795,11 +919,16 @@ mod tests {
     #[test]
     fn config_rejects_undefined_device_type() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
-        cfg.sources[0].device_types.push("nonexistent_device".into());
+        cfg.sources[0]
+            .device_types
+            .push("nonexistent_device".into());
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "引用未定义的设备类型应被拒绝");
         let msg = format!("{}", r.unwrap_err());
-        assert!(msg.contains("nonexistent_device"), "错误信息应包含设备类型名");
+        assert!(
+            msg.contains("nonexistent_device"),
+            "错误信息应包含设备类型名"
+        );
     }
 
     #[test]
@@ -906,14 +1035,13 @@ mod tests {
     fn config_rejects_deeply_nested_fallback() {
         // 构造超过 MAX_FALLBACK_DEPTH(10) 层的 DirectMetric 嵌套链
         use crate::devices::{DirectInner, DirectMetricBody, MemoryStrategy};
-        let mut inner = MemoryStrategy::CompositeFromTotal(
-            crate::devices::CompositeFromTotalBody {
+        let mut inner =
+            MemoryStrategy::CompositeFromTotal(crate::devices::CompositeFromTotalBody {
                 composite_from_total: crate::devices::UsedTotal {
                     used: "bottom_used".into(),
                     total: "bottom_total".into(),
                 },
-            },
-        );
+            });
         for _ in 0..11 {
             inner = MemoryStrategy::DirectMetric(DirectMetricBody {
                 direct_metric: DirectInner {
@@ -927,6 +1055,9 @@ mod tests {
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "超过 10 层的 fallback 嵌套应被拒绝");
         let msg = format!("{}", r.unwrap_err());
-        assert!(msg.contains("fallback") || msg.contains("嵌套"), "错误信息应提及 fallback 嵌套");
+        assert!(
+            msg.contains("fallback") || msg.contains("嵌套"),
+            "错误信息应提及 fallback 嵌套"
+        );
     }
 }

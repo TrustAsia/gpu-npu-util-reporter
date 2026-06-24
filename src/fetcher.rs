@@ -148,7 +148,10 @@ impl MetricFetcher for PrometheusFetcher {
                     .unwrap_or(end)
                     .min(end)
             };
-            match self.query_range_single(promql, seg_start, seg_end, step).await {
+            match self
+                .query_range_single(promql, seg_start, seg_end, step)
+                .await
+            {
                 Ok(segments) => {
                     merge_series(&mut all_series, segments);
                 }
