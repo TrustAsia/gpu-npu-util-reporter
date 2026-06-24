@@ -228,13 +228,12 @@ async fn main() -> ExitCode {
                 );
 
                 // 收集唯一的主机 IP
-                let mut host_ips: Vec<String> = records
+                let host_ips: Vec<String> = records
                     .iter()
                     .map(|r| r.host_ip.clone())
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
-                host_ips.sort();
 
                 for ip in &host_ips {
                     if ip.is_empty() {

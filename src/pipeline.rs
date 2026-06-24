@@ -187,11 +187,11 @@ pub async fn collect_device(
     }
     for s in temp_series {
         let key = series_key(&s, ctx.spec);
-        merge_into(&mut temp_by_key.entry(key).or_default(), s);
+        merge_into(temp_by_key.entry(key).or_default(), s);
     }
     for s in power_series {
         let key = series_key(&s, ctx.spec);
-        merge_into(&mut power_by_key.entry(key).or_default(), s);
+        merge_into(power_by_key.entry(key).or_default(), s);
     }
 
     // 稳定排序：按 key 升序输出，避免 HashMap 随机序。

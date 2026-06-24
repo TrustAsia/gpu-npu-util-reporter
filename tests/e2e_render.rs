@@ -177,7 +177,7 @@ fn renders_report_with_mapping_columns() {
 
     // 验证映射列内容：找到"机房"列，确认数据行值为"北京A区"
     let machine_room_col = (0..range.width())
-        .find(|&c| range.get((0, c)).map_or(false, |v| v.to_string() == "机房"))
+        .find(|&c| range.get((0, c)).is_some_and(|v| v == "机房"))
         .expect("should find machine room column");
     let cell = range
         .get((1, machine_room_col))
