@@ -9,6 +9,7 @@ use crate::highlight::{HexColor, ThresholdTriggers};
 use crate::mapper::compute_column_order;
 use crate::mapper::MappingColumn;
 use crate::processor::CardRecord;
+use chrono_tz::Tz;
 use rust_xlsxwriter::{Color, Format, Workbook};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -43,6 +44,7 @@ pub fn render_to_buffer<S: BuildHasher>(
     mapping_columns: &[MappingColumn],
     thresholds: &ThresholdTriggers,
     mapping_values: &HashMap<(usize, String), String, S>, // (行索引, rename) -> 资产值
+    tz: Tz,
 ) -> Result<Vec<u8>, AppError> {
     // 让 mapping_renames 不触发未使用警告（保留字段以备未来校验）。
     let _ = &spec.mapping_renames;
@@ -123,7 +125,7 @@ pub fn render_to_buffer<S: BuildHasher>(
             #[allow(clippy::cast_possible_truncation)]
             let col = idx as u16;
             let hit_color = hit_colors.get(name.as_str()).copied();
-            let v = cell_value(rec, name, &mapping_borrowed, row_idx);
+            let v = cell_value(rec, name, &mapping_borrowed, row_idx, tz);
             // 累计该列内容的显示宽度（I6）。
             let text = match &v {
                 CellValue::Pct(p) => format_pct_text(*p),
@@ -207,9 +209,12 @@ fn cell_value(
     col: &str,
     mapping_borrowed: &HashMap<(usize, &str), &str>,
     row_idx: usize,
+    tz: Tz,
 ) -> CellValue {
-    // 时间戳 → "YYYY-MM-DD HH:MM:SS" 字符串
-    let ts = |dt: chrono::DateTime<chrono::Utc>| dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    // UTC 时间戳 → 按配置时区渲染为 "YYYY-MM-DD HH:MM:SS" 字符串
+    let ts = |dt: chrono::DateTime<chrono::Utc>| {
+        dt.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S").to_string()
+    };
     match col {
         "数据来源" => CellValue::Text(rec.source_name.clone()),
         "主机IP" => CellValue::Text(rec.host_ip.clone()),
@@ -221,8 +226,8 @@ fn cell_value(
         "容器名称" => CellValue::Text(rec.container.clone()),
         "取值时间范围" => CellValue::Text(format!(
             "{} ~ {}",
-            rec.range_start.format("%Y-%m-%d %H:%M:%S"),
-            rec.range_end.format("%Y-%m-%d %H:%M:%S")
+            rec.range_start.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S"),
+            rec.range_end.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S")
         )),
         "核心利用率平均值" => rec.core_avg.map_or(CellValue::Na, CellValue::Pct),
         "核心利用率峰值" => rec.core_peak.map_or(CellValue::Na, CellValue::Pct),

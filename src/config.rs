@@ -130,6 +130,10 @@ const fn default_step() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub time_range: TimeRangeConfig,
+    /// 显示时区（IANA 时区名，如 `Asia/Shanghai`、`UTC`）。
+    /// 影响报表时间列、模板变量渲染、日志输出；不影响 Prometheus API 交互（始终 UTC）。
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
     pub sources: Vec<SourceConfig>,
     pub devices: HashMap<String, DeviceSpec>,
     /// 向后兼容：旧配置文件中的 `host_ip` 块。主机 IP 标签名现已纳入
@@ -144,6 +148,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub log: LogConfig,
     pub report: ReportConfig,
+}
+
+fn default_timezone() -> String {
+    "Asia/Shanghai".into()
 }
 
 /// 带中文注释的默认配置 YAML（开箱即用模板）。
@@ -164,6 +172,9 @@ pub fn default_config_yaml() -> String {
 time_range:
   start: "now-1d"
   end:   "now"
+
+# 显示时区（影响报表时间列、模板变量、日志；不影响 Prometheus API 交互）
+timezone: "Asia/Shanghai"
 
 # Prometheus 数据源列表
 sources:
@@ -284,6 +295,16 @@ pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
 /// 校验配置合法性。
 #[allow(clippy::too_many_lines)]
 fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
+    // 校验时区名合法性
+    if cfg.timezone.parse::<chrono_tz::Tz>().is_err() {
+        return Err(AppError::Config {
+            path: path.into(),
+            reason: format!(
+                "timezone「{}」不是合法的 IANA 时区名（如 Asia/Shanghai、UTC）",
+                cfg.timezone
+            ),
+        });
+    }
     if cfg.report.query_step_secs == 0 {
         return Err(AppError::Config {
             path: path.into(),
@@ -843,5 +864,20 @@ mod tests {
             validate_config(&cfg, "test.yaml").is_ok(),
             "已知 record_key 应通过校验"
         );
+    }
+
+    #[test]
+    fn config_accepts_valid_timezone() {
+        let cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        assert_eq!(cfg.timezone, "Asia/Shanghai");
+        assert!(validate_config(&cfg, "test.yaml").is_ok());
+    }
+
+    #[test]
+    fn config_rejects_invalid_timezone() {
+        let mut cfg = serde_yaml::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.timezone = "Invalid/Zone".into();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法时区名应被拒绝");
     }
 }

@@ -112,10 +112,15 @@ async fn main() -> ExitCode {
     }
 
     // 3. 渲染模板变量（路径中的 {{start}}, {{end}}, {{now}} 等）
+    let tz: chrono_tz::Tz = cfg.timezone.parse().unwrap_or_else(|_| {
+        error!("时区「{}」无效，使用默认 Asia/Shanghai", cfg.timezone);
+        "Asia/Shanghai".parse().unwrap()
+    });
     let tpl_ctx = template::TemplateContext {
         start,
         end,
         now,
+        tz,
     };
     let output_path = template::render_template(&cfg.report.output_path, &tpl_ctx);
     let log_file_path = template::render_template(&cfg.log.file_path, &tpl_ctx);
@@ -130,10 +135,12 @@ async fn main() -> ExitCode {
     let _log_guard = logging::init_logging(&log_cfg);
 
     info!("配置加载完成");
+    let start_local = start.with_timezone(&tz);
+    let end_local = end.with_timezone(&tz);
     info!(
         "时间范围：{} ~ {}",
-        start.format("%Y-%m-%d %H:%M:%S"),
-        end.format("%Y-%m-%d %H:%M:%S")
+        start_local.format("%Y-%m-%d %H:%M:%S"),
+        end_local.format("%Y-%m-%d %H:%M:%S")
     );
     info!("报表输出路径：{output_path}");
     if cfg.log.file_enabled {
@@ -256,6 +263,7 @@ async fn main() -> ExitCode {
         &mapping_columns,
         &cfg.thresholds,
         &mapping_values,
+        tz,
     ) {
         Ok(buf) => {
             // 创建输出目录（如果路径含模板变量如 {{start_date}}，目录可能不存在）

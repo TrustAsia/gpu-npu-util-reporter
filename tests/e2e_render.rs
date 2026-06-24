@@ -13,6 +13,10 @@ use gpu_npu_util_reporter::processor::CardRecord;
 use gpu_npu_util_reporter::reporter::{render_to_buffer, ReportSpec};
 use std::collections::HashMap;
 
+fn test_tz() -> chrono_tz::Tz {
+    "Asia/Shanghai".parse().unwrap()
+}
+
 #[test]
 fn renders_report_with_highlight_and_reads_back() {
     let rec = CardRecord {
@@ -51,7 +55,7 @@ fn renders_report_with_highlight_and_reads_back() {
         base_columns: BASE_COLUMNS.iter().map(ToString::to_string).collect(),
         mapping_renames: vec![],
     };
-    let buf = render_to_buffer(&[rec], &spec, &[], &tr, &HashMap::new()).unwrap();
+    let buf = render_to_buffer(&[rec], &spec, &[], &tr, &HashMap::new(), test_tz()).unwrap();
     assert!(buf.len() > 1000, "应生成非空 xlsx 字节");
 
     // 用 calamine 读回断言行数
@@ -112,6 +116,7 @@ fn renders_report_with_mapping_columns() {
         &mapping_columns,
         &ThresholdTriggers::default(),
         &mapping_values,
+        test_tz(),
     )
     .unwrap();
     assert!(buf.len() > 1000, "应生成非空 xlsx 字节");
