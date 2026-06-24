@@ -38,7 +38,9 @@ pub fn init_logging(cfg: &LogConfig) -> Option<tracing_appender::non_blocking::W
     if cfg.file_enabled {
         if let Some(parent) = Path::new(&cfg.file_path).parent() {
             if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("[警告] 无法创建日志目录 {}：{e}", parent.display());
+                }
             }
         }
         let file = std::fs::File::create(&cfg.file_path).unwrap_or_else(|e| {

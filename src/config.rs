@@ -574,17 +574,24 @@ fn indent_device(level: usize, spec: &DeviceSpec) -> String {
 ///
 /// 返回 [`AppError::Config`] 当文件读取失败或 YAML 解析失败。
 pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
-    if !std::path::Path::new(path).exists() {
-        std::fs::write(path, default_config_yaml()).map_err(|e| AppError::Config {
-            path: path.into(),
-            reason: format!("无法写入默认配置：{e}"),
-        })?;
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(path).map_err(|e| AppError::Config {
-        path: path.into(),
-        reason: format!("读取失败：{e}"),
-    })?;
+    // 先尝试读取（消除 TOCTOU 窗口：先 exists() 后 read_to_string() 之间
+    // 可能被替换为符号链接）。
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(path, default_config_yaml()).map_err(|e| AppError::Config {
+                path: path.into(),
+                reason: format!("无法写入默认配置：{e}"),
+            })?;
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!("读取失败：{e}"),
+            });
+        }
+    };
     let cfg: AppConfig = serde_yaml_ng::from_str(&content).map_err(|e| AppError::Config {
         path: path.into(),
         reason: format!("{e}"),
