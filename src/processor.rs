@@ -188,9 +188,15 @@ pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
     for (ts, u) in &used.points {
         if let Some(tot) = total_map.get(&ts.timestamp()) {
             if *tot > 0.0 {
+                let raw = u / tot * 100.0;
+                // 负值（Prometheus 计数器重置导致 used 暂时为负）应跳过，
+                // 而非 clamp 为 0%（会误导为"零利用率"）。
+                if raw < 0.0 {
+                    continue;
+                }
                 // 防御性 clamp：Prometheus used/total 计数器采集时差可能导致
-                // used > total，产出超过 100% 的无效利用率。clamp 到 [0, 100]。
-                let v = (u / tot * 100.0).clamp(0.0, 100.0);
+                // used > total，产出超过 100% 的无效利用率。clamp 到 100。
+                let v = raw.min(100.0);
                 // 防御性过滤：除法可能产出 Inf（u 极大 / tot 极小）或 NaN，
                 // 绕过 fetcher 的 parse-time NaN 过滤器，导致 aggregate 结果错误。
                 if v.is_finite() {
@@ -283,7 +289,7 @@ mod tests {
 
     #[test]
     fn hbm_fallback_clamps_inf_to_100() {
-        // 极大 used / 极小 total → Inf，clamp 后为 100.0（满载）。
+        // 极大 used / 极小 total → Inf，min(100) 后为 100.0（满载）。
         let used = Series {
             labels: HashMap::default(),
             points: vec![(t(0), f64::MAX), (t(60), 50.0)],
@@ -293,9 +299,25 @@ mod tests {
             points: vec![(t(0), f64::MIN_POSITIVE), (t(60), 200.0)],
         };
         let fb = hbm_fallback_series(&used, &total);
-        assert_eq!(fb.points.len(), 2, "Inf 应被 clamp 为 100.0 而非丢弃");
-        assert!((fb.points[0].1 - 100.0).abs() < 1e-9, "Inf → clamp → 100%");
+        assert_eq!(fb.points.len(), 2, "Inf 应被 min(100) 为 100.0 而非丢弃");
+        assert!((fb.points[0].1 - 100.0).abs() < 1e-9, "Inf → min → 100%");
         assert!((fb.points[1].1 - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hbm_fallback_skips_negative_used() {
+        // Prometheus 计数器重置导致 used 暂时为负，应跳过而非 clamp 为 0%。
+        let used = Series {
+            labels: HashMap::default(),
+            points: vec![(t(0), -5.0), (t(60), 50.0)],
+        };
+        let total = Series {
+            labels: HashMap::default(),
+            points: vec![(t(0), 200.0), (t(60), 200.0)],
+        };
+        let fb = hbm_fallback_series(&used, &total);
+        assert_eq!(fb.points.len(), 1, "负值应被跳过");
+        assert!((fb.points[0].1 - 25.0).abs() < 1e-9);
     }
 
     #[test]

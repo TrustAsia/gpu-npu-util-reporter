@@ -867,6 +867,12 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
     };
 
     for (key, spec) in &cfg.devices {
+        if spec.display_name.is_empty() {
+            return Err(AppError::Config {
+                path: path.into(),
+                reason: format!("devices.{key}.display_name 不可为空"),
+            });
+        }
         if !is_valid_metric_name(&spec.core_util_metric) {
             return Err(AppError::Config {
                 path: path.into(),
@@ -1618,6 +1624,16 @@ mod tests {
         let yaml = default_config_yaml() + "\nhost_metrics:\n  enabled: false\n";
         let cfg: Result<AppConfig, _> = serde_yaml_ng::from_str(&yaml);
         assert!(cfg.is_ok(), "旧版全局 host_metrics 不应导致解析失败");
+    }
+
+    #[test]
+    fn config_rejects_empty_display_name() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices.get_mut("nvidia_a10").unwrap().display_name = String::new();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 display_name 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("display_name"), "错误信息应提及 display_name");
     }
 
     #[test]
