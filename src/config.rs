@@ -1146,6 +1146,7 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                         || db_type.contains("/*")
                         || db_type.contains('\'')
                         || db_type.contains('"')
+                        || db_type.contains('`')
                     {
                         return Err(AppError::Config {
                             path: path.into(),
@@ -1918,6 +1919,30 @@ mod tests {
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "db_type 含分号应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("db_type"), "错误信息应提及 db_type");
+    }
+
+    #[test]
+    fn database_config_rejects_backtick_in_db_type() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "time_range".into(),
+                db_name: "time_range".into(),
+                db_type: Some("VARCHAR(255)`foo`".into()),
+                comment: "时间范围".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "db_type 含反引号应被拒绝");
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("db_type"), "错误信息应提及 db_type");
     }

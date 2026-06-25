@@ -865,7 +865,7 @@ fn strip_port(s: &str) -> String {
     if let Some((host, port)) = s.rsplit_once(':') {
         if !port.is_empty()
             && port.chars().all(|c| c.is_ascii_digit())
-            && (host.starts_with('[') || (host.contains('.') && !host.contains(':')))
+            && (host.starts_with('[') || !host.contains(':'))
         {
             // 剥 IPv6 方括号：[::1]:9090 → ::1
             return host
@@ -1873,6 +1873,13 @@ mod tests {
         // IPv4-mapped IPv6（如 ::ffff:192.168.1.1）不应被误判为 IPv4:port
         // 旧版 host.contains('.') 会触发误剥，导致 IP 被截断
         assert_eq!(strip_port("::ffff:192.168.1.1"), "::ffff:192.168.1.1");
+    }
+
+    #[test]
+    fn strip_port_short_hostname_with_port() {
+        // 短主机名（无点号）带端口也应正确剥除端口
+        assert_eq!(strip_port("webserver:9090"), "webserver");
+        assert_eq!(strip_port("node1:9100"), "node1");
     }
 
     // ---- 主机指标采集：设备配方中 host_metrics 配置时正确采集 ----
