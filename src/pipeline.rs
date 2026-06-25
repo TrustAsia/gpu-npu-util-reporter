@@ -438,14 +438,16 @@ async fn fallback_composite_from_total_inner(
         .into_iter()
         .filter_map(|(key, u_opt)| {
             let u = u_opt?;
-            let t_opt = total_by_key.get(&key).and_then(|opt| opt.as_ref());
-            if t_opt.is_none() {
-                ctx.out.push_warning(format!(
-                    "CompositeFromTotal fallback：设备 {key} 有 used 数据但无 total 数据，跳过显存计算"
-                ));
-                return None;
-            }
-            Some(processor::hbm_fallback_series(&u, t_opt.unwrap()))
+            let t = match total_by_key.get(&key).and_then(|opt| opt.as_ref()) {
+                Some(t) => t,
+                None => {
+                    ctx.out.push_warning(format!(
+                        "CompositeFromTotal fallback：设备 {key} 有 used 数据但无 total 数据，跳过显存计算"
+                    ));
+                    return None;
+                }
+            };
+            Some(processor::hbm_fallback_series(&u, t))
         })
         .collect()
 }
@@ -479,15 +481,17 @@ async fn fallback_composite_ratio(
         .into_iter()
         .filter_map(|(key, u_opt)| {
             let u = u_opt?;
-            let f_opt = free_by_key.get(&key).and_then(|opt| opt.as_ref());
-            if f_opt.is_none() {
-                ctx.out.push_warning(format!(
-                    "CompositeRatio fallback：设备 {key} 有 used 数据但无 free 数据，跳过显存计算"
-                ));
-                return None;
-            }
+            let f = match free_by_key.get(&key).and_then(|opt| opt.as_ref()) {
+                Some(f) => f,
+                None => {
+                    ctx.out.push_warning(format!(
+                        "CompositeRatio fallback：设备 {key} 有 used 数据但无 free 数据，跳过显存计算"
+                    ));
+                    return None;
+                }
+            };
             // 合成 total = used + free 的伪 Series（逐点相加）
-            let total = synthesize_total(&u, f_opt.unwrap());
+            let total = synthesize_total(&u, f);
             Some(processor::hbm_fallback_series(&u, &total))
         })
         .collect()
@@ -723,7 +727,8 @@ pub(crate) fn extract_ip(labels: &HashMap<String, String>, prefer: &str) -> Stri
 }
 
 /// 从 "ip:port" 或 "[ipv6]:port" 实例地址中剥离端口号，
-/// 返回裸 IP（IPv6 去掉外围方括号）。不含端口的地址原样返回。
+/// 返回裸 IP（IPv6 去掉外围方括号）。不含端口的地址原样返回，
+/// 但 [ipv6]（有方括号无端口）也会剥去方括号返回裸 IPv6。
 fn strip_port(s: &str) -> String {
     if let Some((host, port)) = s.rsplit_once(':') {
         if !port.is_empty()
@@ -738,7 +743,11 @@ fn strip_port(s: &str) -> String {
                 .to_string();
         }
     }
-    s.to_string()
+    // 无端口但带方括号的 IPv6（如 [::1]），也需剥去方括号。
+    s.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(s)
+        .to_string()
 }
 
 /// 对字符串做 Prometheus 正则转义（RE2 语法）。
@@ -795,6 +804,11 @@ fn escape_promql_label_value(s: &str) -> String {
 /// 对于 IPv6，生成同时匹配带方括号和不带方括号两种格式的正则，
 /// 兼容默认 `instance` 标签（总是带方括号）和自定义标签（可能不带方括号）。
 ///
+/// Prometheus `=~` 是全锚定匹配（等同 `^...$`），因此正则必须消费整个标签值。
+/// IPv4 和 IPv6 方括号分支使用 `($|:.*)` 匹配行尾或冒号+端口号；
+/// 裸 IPv6 分支仅用 `$`（不含 `:.*`），因为冒号是 IPv6 地址的结构字符，
+/// `:.*` 会导致前缀共享的 IPv6 地址误匹配（如 `2001:db8::1` 匹配 `2001:db8::1:2`）。
+///
 /// 输出为 Go 双引号字符串字面量中的正则表达式（RE2 语法），
 /// 适配 Prometheus PromQL `=~"..."` 的 Go 解析规则。
 #[must_use]
@@ -804,10 +818,15 @@ pub fn build_instance_regex(ip: &str) -> String {
         // IPv6：同时匹配 [ip]:port / [ip] 和裸 ip:port / ip，
         // 兼容 instance 标签（总带方括号）和自定义 host_label（可能不带）。
         // RE2 中 \[ / \] 匹配字面方括号；Go 字符串 \\\\[ → \\[ → RE2 \[。
-        format!("^(\\\\[{escaped}\\\\]($|:)|{escaped}($|:))")
+        // ($|:.*) 匹配行尾或冒号+端口；Prometheus =~ 是全锚定（等同 ^...$），
+        // ($|:) 无法消费端口号导致带端口标签值匹配失败。
+        // 裸 IPv6 分支仅用 $（不含 :.*），因为冒号在 IPv6 地址中是结构字符，
+        // ($|:.*) 会导致前缀共享的 IPv6 地址误匹配（如 2001:db8::1 匹配 2001:db8::1:2）。
+        format!("^(\\\\[{escaped}\\\\]($|:.*)|{escaped}$)")
     } else {
-        // IPv4：精确匹配 IP 后跟行尾或冒号（有/无端口均可）。
-        format!("^{escaped}($|:)")
+        // IPv4：精确匹配 IP 后跟行尾或冒号+端口（有/无端口均可）。
+        // Prometheus =~ 全锚定，($|:.*) 消费端口号，($|:) 会因端口残留而匹配失败。
+        format!("^{escaped}($|:.*)")
     }
 }
 
@@ -1670,21 +1689,48 @@ mod tests {
     #[test]
     fn build_instance_regex_ipv4() {
         let regex = build_instance_regex("192.168.1.1");
-        // IPv4：精确匹配 IP 后跟行尾或冒号
-        assert_eq!(regex, r"^192\\.168\\.1\\.1($|:)");
+        // IPv4：精确匹配 IP 后跟行尾或冒号+端口
+        assert_eq!(regex, r"^192\\.168\\.1\\.1($|:.*)");
     }
 
     #[test]
     fn build_instance_regex_ipv6_matches_both_bare_and_bracketed() {
         let regex = build_instance_regex("2001:db8::1");
         // IPv6：应同时匹配带方括号和不带方括号的格式
-        // 带方括号部分：^\\[2001:db8::1\\]($|:)
-        // 裸 IPv6 部分：^2001:db8::1($|:) — 注意 : 不需要转义（RE2 字面量）
+        // 带方括号部分：^(\\[2001:db8::1\\]($|:.*) — 匹配 [ip]:port 和 [ip]
+        // 裸 IPv6 部分：2001:db8::1$) — 仅匹配裸 ip（不含 :.*，避免前缀误匹配）
         assert!(regex.contains(r"\\["), "应含方括号转义 \\[");
         assert!(regex.contains(r"\\]"), "应含方括号转义 \\]");
         assert!(regex.contains("2001:db8::1"), "应含 IP 字面量");
         // 两种选择用 | 组合，外层 ^... 包裹
         assert!(regex.starts_with("^("), "应以 ^( 开头");
         assert!(regex.ends_with(")"), "应以 ) 结尾");
+        // 方括号分支使用 ($|:.*) 消费端口号
+        assert!(regex.contains("($|:.*)"), "方括号分支应含 ($|:.*)");
+        // 裸 IPv6 分支仅用 $（不含 :.*，避免前缀误匹配）
+        assert!(regex.contains("2001:db8::1$)"), "裸 IPv6 分支应以 $ 结尾");
+    }
+
+    #[test]
+    fn strip_port_bracketed_ipv6_without_port() {
+        // [::1] 无端口时应剥去方括号返回裸 IPv6
+        assert_eq!(strip_port("[::1]"), "::1");
+    }
+
+    #[test]
+    fn strip_port_bracketed_ipv6_with_port() {
+        // [::1]:9090 应剥去方括号和端口
+        assert_eq!(strip_port("[::1]:9090"), "::1");
+    }
+
+    #[test]
+    fn strip_port_ipv4_with_port() {
+        assert_eq!(strip_port("192.168.1.1:9090"), "192.168.1.1");
+    }
+
+    #[test]
+    fn strip_port_bare_ipv6() {
+        // 裸 IPv6 无端口，原样返回（无法区分地址内冒号与端口冒号）
+        assert_eq!(strip_port("2001:db8::1"), "2001:db8::1");
     }
 }
