@@ -400,6 +400,11 @@ async fn insert_records(
         vals = placeholders.join(", ")
     );
 
+    // 开启事务，确保所有 INSERT 原子提交或整体回滚，避免部分写入留下不完整数据
+    let mut tx = pool.begin().await.map_err(|e| AppError::Database {
+        detail: format!("开启事务失败：{e}"),
+    })?;
+
     let mut count = 0usize;
     let mut first_error: Option<String> = None;
     for (row_idx, rec) in records.iter().enumerate() {
@@ -419,7 +424,7 @@ async fn insert_records(
                 None => query = query.bind(None::<String>),
             }
         }
-        match query.execute(pool).await {
+        match query.execute(&mut *tx).await {
             Ok(_) => count += 1,
             Err(e) => {
                 if first_error.is_none() {
@@ -429,7 +434,10 @@ async fn insert_records(
             }
         }
     }
+
     if count == 0 {
+        // 全部失败：回滚事务
+        let _ = tx.rollback().await;
         return Err(AppError::Database {
             detail: format!(
                 "所有 {total} 行写入均失败，首条错误：{e}",
@@ -440,10 +448,24 @@ async fn insert_records(
     }
     if count < records.len() {
         warn!(
-            "部分行写入失败：{count}/{} 行成功",
+            "部分行写入失败：{count}/{} 行成功，回滚事务以保证数据一致性",
             records.len()
         );
+        let _ = tx.rollback().await;
+        return Err(AppError::Database {
+            detail: format!(
+                "部分行写入失败（{count}/{} 成功），已回滚事务，首条错误：{e}",
+                records.len(),
+                e = first_error.expect("first_error set when count < records.len()")
+            ),
+        });
     }
+
+    // 全部成功：提交事务
+    tx.commit().await.map_err(|e| AppError::Database {
+        detail: format!("提交事务失败：{e}"),
+    })?;
+
     Ok(count)
 }
 
