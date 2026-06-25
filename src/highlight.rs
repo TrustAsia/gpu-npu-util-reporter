@@ -104,7 +104,7 @@ pub struct TriggerConfig {
     pub color: HexColor,
 }
 
-/// 24 个触发器的显式集合；`None` 字段 = 该触发器未配置/关闭。
+/// 28 个触发器的显式集合；`None` 字段 = 该触发器未配置/关闭。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ThresholdTriggers {

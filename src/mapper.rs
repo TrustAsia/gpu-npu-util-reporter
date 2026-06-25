@@ -190,7 +190,7 @@ pub fn compute_column_flags(
             if let Some(hm) = &spec.host_metrics {
                 flags.has_host_cpu = true;
                 flags.has_host_mem = true;
-                flags.has_host_handle = hm.handle_metric.is_some();
+                flags.has_host_handle |= hm.handle_metric.is_some();
             }
         }
     }
@@ -1282,5 +1282,64 @@ mod tests {
             cfg.duplicate_rename_warnings().is_empty(),
             "无重复 rename 不应产出警告"
         );
+    }
+
+    #[test]
+    fn compute_column_flags_host_handle_uses_logical_or() {
+        // 两个设备类型：A 有 handle_metric，B 没有。
+        // has_host_handle 应为 true（任一设备有即启用），不应被后者覆盖为 false。
+        let sources = vec![crate::config::SourceConfig {
+            name: "s".into(),
+            url: "http://x".into(),
+            timeout_secs: 30,
+            device_types: vec!["dev_a".into(), "dev_b".into()],
+        }];
+        let mut devices = std::collections::HashMap::new();
+        devices.insert("dev_a".into(), crate::devices::DeviceSpec {
+            display_name: "A".into(),
+            core_util_metric: "m".into(),
+            memory: crate::devices::MemoryStrategy::composite_ratio("u", "f"),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "ip".into(),
+                node_name: "n".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "ns".into(),
+            },
+            temp_metric: None,
+            power_metric: None,
+            host_metrics: Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "cpu".into(),
+                mem_metric: "mem".into(),
+                handle_metric: Some("handle".into()),
+                host_label: "instance".into(),
+            }),
+        });
+        devices.insert("dev_b".into(), crate::devices::DeviceSpec {
+            display_name: "B".into(),
+            core_util_metric: "m2".into(),
+            memory: crate::devices::MemoryStrategy::composite_ratio("u2", "f2"),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "ip".into(),
+                node_name: "n".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "ns".into(),
+            },
+            temp_metric: None,
+            power_metric: None,
+            host_metrics: Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "cpu2".into(),
+                mem_metric: "mem2".into(),
+                handle_metric: None,
+                host_label: "instance".into(),
+            }),
+        });
+        let flags = compute_column_flags(&sources, &devices);
+        assert!(flags.has_host_handle, "has_host_handle 应为 true（dev_a 有 handle_metric），不应被 dev_b 覆盖");
+        assert!(flags.has_host_cpu);
+        assert!(flags.has_host_mem);
     }
 }
