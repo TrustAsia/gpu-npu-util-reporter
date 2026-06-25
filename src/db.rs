@@ -62,10 +62,12 @@ pub async fn push_to_database(
         });
     }
 
-    // 连接数据库
+    // 连接数据库（30 秒连接超时，防止不可达时无限挂起）
     let url = build_mysql_url(cfg);
     info!("连接 MySQL：{}:{}", cfg.host, cfg.port);
-    let pool = sqlx::MySqlPool::connect(&url)
+    let pool = sqlx::pool::PoolOptions::<MySql>::new()
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(&url)
         .await
         .map_err(|e| AppError::Database {
             detail: format!(
@@ -79,7 +81,7 @@ pub async fn push_to_database(
         ensure_table(&pool, cfg, &mapped_cols).await?;
 
         // 逐行 INSERT
-        let count = insert_records(&pool, cfg, records, &mapped_cols, mapping_values, &order, tz)
+        let count = insert_records(&pool, cfg, records, &mapped_cols, mapping_values, tz)
             .await?;
 
         info!("数据库推送完成：{count} 行写入 {db}.{table}", db = cfg.database, table = cfg.table);
@@ -287,12 +289,21 @@ async fn get_table_columns(
     Ok(rows.into_iter().collect())
 }
 
+/// 转义 MySQL 字符串字面量中的特殊字符（用于 DDL COMMENT）。
+fn escape_mysql_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "''")
+        .replace('\0', "\\0")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// 生成 CREATE TABLE DDL。
 fn generate_create_ddl(cfg: &DatabaseConfig, mapped_cols: &[(&str, &str, &str)]) -> String {
     let mut lines = Vec::new();
     for (local_name, db_name, comment) in mapped_cols {
         let sql_type = infer_sql_type(local_name);
-        let comment_escaped = comment.replace('\\', "\\\\").replace('\'', "''");
+        let comment_escaped = escape_mysql_string(comment);
         lines.push(format!(
             "  `{db_name}` {sql_type} COMMENT '{comment_escaped}'"
         ));
@@ -314,7 +325,7 @@ fn generate_alter_ddl(
     for (local_name, db_name, comment) in mapped_cols {
         if missing.contains(db_name) {
             let sql_type = infer_sql_type(local_name);
-            let comment_escaped = comment.replace('\\', "\\\\").replace('\'', "''");
+            let comment_escaped = escape_mysql_string(comment);
             lines.push(format!(
                 "ADD COLUMN `{db_name}` {sql_type} COMMENT '{comment_escaped}'"
             ));
@@ -329,28 +340,25 @@ fn generate_alter_ddl(
 
 /// 根据本地列名推断 MySQL 数据类型。
 fn infer_sql_type(local_name: &str) -> &'static str {
-    // 百分比列 → DOUBLE（存 0-100 的值）
-    if local_name.contains("平均值") && !local_name.contains("数据量") && !local_name.contains("句柄数") {
-        return "DOUBLE DEFAULT NULL";
+    // 时间范围 → VARCHAR（"取值时间范围"是文本，不是单个时间点）
+    if local_name.contains("时间范围") {
+        return "VARCHAR(64) DEFAULT NULL";
     }
-    if local_name.contains("峰值") && !local_name.contains("时间") && !local_name.contains("数据量") && !local_name.contains("句柄数") {
-        return "DOUBLE DEFAULT NULL";
-    }
-    // 句柄数 → DOUBLE（可能是非整数）
-    if local_name.contains("句柄数") {
-        return "DOUBLE DEFAULT NULL";
+    // 时间列 → DATETIME（必须在句柄数/峰值检查之前，否则"主机句柄数峰值出现时间"误判为 DOUBLE）
+    if local_name.contains("时间") {
+        return "DATETIME DEFAULT NULL";
     }
     // 数据量 → INT
     if local_name.contains("数据量") {
         return "INT DEFAULT NULL";
     }
-    // 时间范围 → VARCHAR（"取值时间范围"是文本，不是单个时间点）
-    if local_name.contains("时间范围") {
-        return "VARCHAR(64) DEFAULT NULL";
+    // 句柄数 → DOUBLE（可能是非整数）
+    if local_name.contains("句柄数") {
+        return "DOUBLE DEFAULT NULL";
     }
-    // 时间列 → DATETIME
-    if local_name.contains("时间") {
-        return "DATETIME DEFAULT NULL";
+    // 百分比/绝对值列 → DOUBLE
+    if local_name.contains("平均值") || local_name.contains("峰值") {
+        return "DOUBLE DEFAULT NULL";
     }
     // 文本列 → VARCHAR
     "VARCHAR(255) DEFAULT NULL"
@@ -363,7 +371,6 @@ async fn insert_records(
     records: &[CardRecord],
     mapped_cols: &[(&str, &str, &str)],
     mapping_values: &HashMap<(usize, String), String>,
-    _order: &[String],
     tz: Tz,
 ) -> Result<usize, AppError> {
     // 构建 mapping_borrowed 索引
@@ -384,13 +391,13 @@ async fn insert_records(
     );
 
     let mut count = 0usize;
+    let mut first_error: Option<String> = None;
     for (row_idx, rec) in records.iter().enumerate() {
         // 构建该行的值（按 mapped_cols 顺序）
         let values: Vec<Option<String>> = mapped_cols
             .iter()
             .map(|(local_name, _db_name, _comment)| {
-                let cell = crate::reporter::cell_value_for_db(rec, local_name, &mapping_borrowed, row_idx, tz);
-                cell
+                crate::reporter::cell_value_for_db(rec, local_name, &mapping_borrowed, row_idx, tz)
             })
             .collect();
 
@@ -405,9 +412,27 @@ async fn insert_records(
         match query.execute(pool).await {
             Ok(_) => count += 1,
             Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(format!("{e}"));
+                }
                 warn!("写入第 {} 行失败：{e}", row_idx + 1);
             }
         }
+    }
+    if count == 0 {
+        return Err(AppError::Database {
+            detail: format!(
+                "所有 {total} 行写入均失败，首条错误：{e}",
+                total = records.len(),
+                e = first_error.expect("at least one error when count==0")
+            ),
+        });
+    }
+    if count < records.len() {
+        warn!(
+            "部分行写入失败：{count}/{} 行成功",
+            records.len()
+        );
     }
     Ok(count)
 }
@@ -435,8 +460,6 @@ mod tests {
     fn infer_sql_type_number_columns() {
         assert_eq!(infer_sql_type("设备温度平均值"), "DOUBLE DEFAULT NULL");
         assert_eq!(infer_sql_type("设备功率峰值"), "DOUBLE DEFAULT NULL");
-        assert_eq!(infer_sql_type("主机句柄数平均值"), "DOUBLE DEFAULT NULL");
-        assert_eq!(infer_sql_type("主机句柄数峰值"), "DOUBLE DEFAULT NULL");
     }
 
     #[test]
@@ -449,6 +472,13 @@ mod tests {
     fn infer_sql_type_time_columns() {
         assert_eq!(infer_sql_type("核心利用率峰值出现时间"), "DATETIME DEFAULT NULL");
         assert_eq!(infer_sql_type("主机CPU利用率峰值出现时间"), "DATETIME DEFAULT NULL");
+        assert_eq!(infer_sql_type("主机句柄数峰值出现时间"), "DATETIME DEFAULT NULL");
+    }
+
+    #[test]
+    fn infer_sql_type_handle_columns() {
+        assert_eq!(infer_sql_type("主机句柄数平均值"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("主机句柄数峰值"), "DOUBLE DEFAULT NULL");
     }
 
     #[test]
@@ -456,6 +486,16 @@ mod tests {
         assert_eq!(infer_sql_type("数据来源"), "VARCHAR(255) DEFAULT NULL");
         assert_eq!(infer_sql_type("主机IP"), "VARCHAR(255) DEFAULT NULL");
         assert_eq!(infer_sql_type("取值时间范围"), "VARCHAR(64) DEFAULT NULL");
+    }
+
+    #[test]
+    fn escape_mysql_string_handles_special_chars() {
+        assert_eq!(escape_mysql_string("hello"), "hello");
+        assert_eq!(escape_mysql_string("it's"), "it''s");
+        assert_eq!(escape_mysql_string("path\\file"), "path\\\\file");
+        assert_eq!(escape_mysql_string("line1\nline2"), "line1\\nline2");
+        assert_eq!(escape_mysql_string("cr\r\nlf"), "cr\\r\\nlf");
+        assert_eq!(escape_mysql_string("null\0byte"), "null\\0byte");
     }
 
     #[test]

@@ -1058,6 +1058,20 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                         reason: format!("database.columns 中 local_name「{}」重复", col.local_name),
                     });
                 }
+                // 校验 local_name 是否对应已知的基础列名或映射列 rename
+                let mapping_renames: Vec<String> = cfg.mapping.as_ref()
+                    .and_then(|m| if m.enabled { Some(m) } else { None })
+                    .map(|m| m.all_columns_owned().iter().map(|c| c.rename.clone()).collect())
+                    .unwrap_or_default();
+                if !is_known_base_column(&col.local_name) && !mapping_renames.iter().any(|r| r == &col.local_name) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "database.columns 中 local_name「{}」不匹配任何已知报表列名或映射列名（可能是拼写错误）",
+                            col.local_name
+                        ),
+                    });
+                }
             }
         }
     }
@@ -1166,6 +1180,24 @@ fn is_valid_mysql_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// 检查 local_name 是否对应已知的报表列名（基础列 + 可选列组）。
+///
+/// 映射列（来自资产表）在配置校验时无法枚举，因此不在检查范围内。
+/// 此函数仅捕获基础列名的拼写错误。
+fn is_known_base_column(name: &str) -> bool {
+    use crate::mapper::{
+        BASE_COLUMNS, TEMP_COLUMNS, POWER_COLUMNS,
+        HOST_CPU_COLUMNS, HOST_MEM_COLUMNS, HOST_HANDLE_COLUMNS,
+    };
+    BASE_COLUMNS.iter()
+        .chain(TEMP_COLUMNS.iter())
+        .chain(POWER_COLUMNS.iter())
+        .chain(HOST_CPU_COLUMNS.iter())
+        .chain(HOST_MEM_COLUMNS.iter())
+        .chain(HOST_HANDLE_COLUMNS.iter())
+        .any(|&c| c == name)
 }
 
 /// 用 CLI 覆盖配置字段（start/end/output）。

@@ -47,7 +47,7 @@ const CORE_BASE_COLUMNS: &[&str] = &[
 ];
 
 /// 设备温度列（按温度指标配置时出现）。
-const TEMP_COLUMNS: &[&str] = &[
+pub const TEMP_COLUMNS: &[&str] = &[
     "设备温度平均值",
     "设备温度峰值",
     "设备温度峰值出现时间",
@@ -57,7 +57,7 @@ const TEMP_COLUMNS: &[&str] = &[
 ];
 
 /// 设备功率列（按功率指标配置时出现）。
-const POWER_COLUMNS: &[&str] = &[
+pub const POWER_COLUMNS: &[&str] = &[
     "设备功率平均值",
     "设备功率峰值",
     "设备功率峰值出现时间",
@@ -67,21 +67,21 @@ const POWER_COLUMNS: &[&str] = &[
 ];
 
 /// 主机 CPU 列（启用主机指标时出现）。
-const HOST_CPU_COLUMNS: &[&str] = &[
+pub const HOST_CPU_COLUMNS: &[&str] = &[
     "主机CPU利用率平均值",
     "主机CPU利用率峰值",
     "主机CPU利用率峰值出现时间",
 ];
 
 /// 主机内存列（启用主机指标时出现）。
-const HOST_MEM_COLUMNS: &[&str] = &[
+pub const HOST_MEM_COLUMNS: &[&str] = &[
     "主机内存利用率平均值",
     "主机内存利用率峰值",
     "主机内存利用率峰值出现时间",
 ];
 
 /// 主机句柄数列（启用主机指标且配置了 handle_metric 时出现）。
-const HOST_HANDLE_COLUMNS: &[&str] = &[
+pub const HOST_HANDLE_COLUMNS: &[&str] = &[
     "主机句柄数平均值",
     "主机句柄数峰值",
     "主机句柄数峰值出现时间",

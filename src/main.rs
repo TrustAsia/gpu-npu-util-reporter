@@ -415,7 +415,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    // 9. 数据库推送（可选）
+    // 9. 数据库推送（可选，失败不阻断——Excel 报表已生成）
     if let Some(db_cfg) = &cfg.database {
         if db_cfg.enabled {
             info!("开始推送数据到 MySQL");
@@ -431,8 +431,8 @@ async fn main() -> ExitCode {
             {
                 Ok(()) => info!("数据库推送完成"),
                 Err(e) => {
-                    error!("{e}");
-                    return ExitCode::from(1);
+                    warn!("数据库推送失败：{e}");
+                    warnings.push(format!("{e}"));
                 }
             }
         }
