@@ -166,6 +166,39 @@ pub struct ColumnFlags {
     pub has_host_handle: bool,
 }
 
+/// 根据设备配方和主机指标配置计算列标志位。
+///
+/// 仅检查被数据源实际引用的设备类型，避免未引用的设备类型
+/// 在报表中产生全 N/A 的额外列。
+#[must_use]
+pub fn compute_column_flags(
+    sources: &[crate::config::SourceConfig],
+    devices: &std::collections::HashMap<String, crate::devices::DeviceSpec>,
+    host_metrics: Option<&crate::config::HostMetricsConfig>,
+) -> ColumnFlags {
+    let mut flags = ColumnFlags::default();
+    let active_device_keys: std::collections::HashSet<&String> =
+        sources.iter().flat_map(|s| &s.device_types).collect();
+    for (key, spec) in devices {
+        if active_device_keys.contains(key) {
+            if spec.temp_metric.is_some() {
+                flags.has_temp = true;
+            }
+            if spec.power_metric.is_some() {
+                flags.has_power = true;
+            }
+        }
+    }
+    if let Some(hm) = host_metrics {
+        if hm.enabled {
+            flags.has_host_cpu = true;
+            flags.has_host_mem = true;
+            flags.has_host_handle = hm.handle_metric.is_some();
+        }
+    }
+    flags
+}
+
 /// 根据配置构建基础列有序清单。
 ///
 /// 核心列始终出现；可选列组按 flags 决定是否追加。
@@ -406,23 +439,18 @@ impl MappingConfig {
             .collect()
     }
 
-    /// 检测映射列 rename 是否与基础列显示名冲突。
+    /// 检测映射列 rename 是否与当前活跃的基础列显示名冲突。
+    /// 仅检查由 flags 决定的活跃列，避免对未启用的指标组过度拒绝。
     /// 冲突会导致 compute_column_order 产出重复列名，造成 Excel/数据库数据错乱。
     #[must_use]
-    pub fn rename_collides_with_base_warnings(&self) -> Vec<String> {
-        let all_base: std::collections::HashSet<&str> = CORE_BASE_COLUMNS
-            .iter()
-            .chain(TEMP_COLUMNS.iter())
-            .chain(POWER_COLUMNS.iter())
-            .chain(HOST_CPU_COLUMNS.iter())
-            .chain(HOST_MEM_COLUMNS.iter())
-            .chain(HOST_HANDLE_COLUMNS.iter())
-            .copied()
-            .collect();
+    pub fn rename_collides_with_base_warnings(&self, flags: ColumnFlags) -> Vec<String> {
+        let active_base = build_base_columns(flags);
+        let active_set: std::collections::HashSet<&str> =
+            active_base.iter().map(String::as_str).collect();
         self.sources
             .iter()
             .flat_map(|s| &s.columns)
-            .filter(|c| all_base.contains(c.rename.as_str()))
+            .filter(|c| active_set.contains(c.rename.as_str()))
             .map(|c| {
                 format!(
                     "映射列 rename「{}」与基础列显示名冲突，将导致数据覆盖",
@@ -757,6 +785,30 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use chrono::Utc;
+
+    #[test]
+    fn paired_arrays_have_matching_lengths() {
+        assert_eq!(CORE_BASE_COLUMNS.len(), CORE_BASE_LOCAL_NAMES.len(),
+            "CORE_BASE_COLUMNS 与 CORE_BASE_LOCAL_NAMES 长度必须一致");
+        assert_eq!(TEMP_COLUMNS.len(), TEMP_LOCAL_NAMES.len(),
+            "TEMP_COLUMNS 与 TEMP_LOCAL_NAMES 长度必须一致");
+        assert_eq!(POWER_COLUMNS.len(), POWER_LOCAL_NAMES.len(),
+            "POWER_COLUMNS 与 POWER_LOCAL_NAMES 长度必须一致");
+        assert_eq!(HOST_CPU_COLUMNS.len(), HOST_CPU_LOCAL_NAMES.len(),
+            "HOST_CPU_COLUMNS 与 HOST_CPU_LOCAL_NAMES 长度必须一致");
+        assert_eq!(HOST_MEM_COLUMNS.len(), HOST_MEM_LOCAL_NAMES.len(),
+            "HOST_MEM_COLUMNS 与 HOST_MEM_LOCAL_NAMES 长度必须一致");
+        assert_eq!(HOST_HANDLE_COLUMNS.len(), HOST_HANDLE_LOCAL_NAMES.len(),
+            "HOST_HANDLE_COLUMNS 与 HOST_HANDLE_LOCAL_NAMES 长度必须一致");
+    }
+
+    #[test]
+    fn build_base_columns_and_local_names_same_length() {
+        let flags = ColumnFlags { has_temp: true, has_power: true, has_host_cpu: true, has_host_mem: true, has_host_handle: true };
+        let cols = build_base_columns(flags);
+        let names = build_base_local_names(flags);
+        assert_eq!(cols.len(), names.len(), "build_base_columns 与 build_base_local_names 长度必须一致");
+    }
 
     fn rec(ip: &str, card: &str) -> CardRecord {
         CardRecord {

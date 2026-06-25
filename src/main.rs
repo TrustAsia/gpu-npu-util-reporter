@@ -9,7 +9,6 @@ use gpu_npu_util_reporter::error::AppError;
 use gpu_npu_util_reporter::fetcher::{MetricFetcher, PrometheusFetcher};
 use gpu_npu_util_reporter::logging;
 use gpu_npu_util_reporter::mapper;
-use gpu_npu_util_reporter::mapper::ColumnFlags;
 use gpu_npu_util_reporter::pipeline;
 use gpu_npu_util_reporter::processor::CardRecord;
 use gpu_npu_util_reporter::reporter;
@@ -198,27 +197,13 @@ async fn main() -> ExitCode {
     info!("全部采集完成，共 {} 条记录", records.len());
 
     // 5.5. 主机指标采集（可选，通用指标）
-    let mut column_flags = ColumnFlags::default();
-    // 检查是否有设备配置了温度/功率指标（仅检查被数据源实际引用的设备类型，
-    // 避免未引用的设备类型在报表中产生全 N/A 的额外列）
-    let active_device_keys: std::collections::HashSet<&String> =
-        cfg.sources.iter().flat_map(|s| &s.device_types).collect();
-    for (key, spec) in &cfg.devices {
-        if active_device_keys.contains(key) {
-            if spec.temp_metric.is_some() {
-                column_flags.has_temp = true;
-            }
-            if spec.power_metric.is_some() {
-                column_flags.has_power = true;
-            }
-        }
-    }
+    let column_flags = mapper::compute_column_flags(
+        &cfg.sources,
+        &cfg.devices,
+        cfg.host_metrics.as_ref(),
+    );
     if let Some(hm) = &cfg.host_metrics {
         if hm.enabled {
-            column_flags.has_host_cpu = true;
-            column_flags.has_host_mem = true;
-            column_flags.has_host_handle = hm.handle_metric.is_some();
-
             // 确定使用哪个数据源
             let host_source = if let Some(ref name) = hm.source {
                 cfg.sources.iter().find(|s| &s.name == name)

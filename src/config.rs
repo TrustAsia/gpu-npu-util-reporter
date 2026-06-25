@@ -1022,8 +1022,13 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     reason: first.clone(),
                 });
             }
-            // 检测映射列 rename 与基础列显示名冲突
-            let collision_warnings = mapping.rename_collides_with_base_warnings();
+            // 检测映射列 rename 与基础列显示名冲突（仅检查当前活跃列）
+            let flags = crate::mapper::compute_column_flags(
+                &cfg.sources,
+                &cfg.devices,
+                cfg.host_metrics.as_ref(),
+            );
+            let collision_warnings = mapping.rename_collides_with_base_warnings(flags);
             if let Some(first) = collision_warnings.first() {
                 return Err(AppError::Config {
                     path: path.into(),

@@ -544,4 +544,80 @@ mod tests {
             "有值的文本列应返回 Some"
         );
     }
+
+    #[test]
+    fn cell_value_for_db_formats_pct_number_count_correctly() {
+        use crate::processor::CardRecord;
+        use chrono::TimeZone;
+        use chrono::Utc;
+        let rec = CardRecord {
+            source_name: "s".into(),
+            host_ip: "1.1.1.1".into(),
+            node_name: String::new(),
+            card_id: "0".into(),
+            device_type: "X".into(),
+            namespace: String::new(),
+            pod: String::new(),
+            container: String::new(),
+            core_avg: Some(85.5),       // Pct
+            core_peak: Some(99.9),      // Pct
+            core_peak_time: Some(Utc.timestamp_opt(1000, 0).unwrap()), // Time
+            core_count: Some(3600),     // Count
+            core_first_time: None,
+            core_last_time: None,
+            mem_avg: None,
+            mem_peak: None,
+            mem_peak_time: None,
+            mem_count: None,
+            mem_first_time: None,
+            mem_last_time: None,
+            temp_avg: Some(65.0),       // Number
+            temp_peak: None,
+            temp_peak_time: None,
+            temp_count: None,
+            temp_first_time: None,
+            temp_last_time: None,
+            power_avg: None,
+            power_peak: Some(250.5),    // Number
+            power_peak_time: None,
+            power_count: None,
+            power_first_time: None,
+            power_last_time: None,
+            host_cpu_avg: None,
+            host_cpu_peak: None,
+            host_cpu_peak_time: None,
+            host_mem_avg: None,
+            host_mem_peak: None,
+            host_mem_peak_time: None,
+            host_handle_avg: None,
+            host_handle_peak: None,
+            host_handle_peak_time: None,
+            range_start: Utc.timestamp_opt(0, 0).unwrap(),
+            range_end: Utc.timestamp_opt(60, 0).unwrap(),
+        };
+        let mapping_borrowed: HashMap<(usize, &str), &str> = HashMap::new();
+        let tz: chrono_tz::Tz = "Asia/Shanghai".parse().unwrap();
+        // Pct → "85.50" (0-100 原始值，不除以 100)
+        assert_eq!(
+            cell_value_for_db(&rec, "核心利用率平均值", &mapping_borrowed, 0, tz),
+            Some("85.50".into()),
+            "Pct 值应格式化为两位小数（0-100）"
+        );
+        // Number → "65.00"
+        assert_eq!(
+            cell_value_for_db(&rec, "设备温度平均值", &mapping_borrowed, 0, tz),
+            Some("65.00".into()),
+            "Number 值应格式化为两位小数"
+        );
+        // Count → "3600"
+        assert_eq!(
+            cell_value_for_db(&rec, "核心利用率数据量", &mapping_borrowed, 0, tz),
+            Some("3600".into()),
+            "Count 值应格式化为整数"
+        );
+        // Time → should contain date
+        let time_val = cell_value_for_db(&rec, "核心利用率峰值出现时间", &mapping_borrowed, 0, tz);
+        assert!(time_val.is_some(), "Time 值应返回 Some");
+        assert!(time_val.as_ref().unwrap().contains("1970"), "Time 值应包含日期");
+    }
 }

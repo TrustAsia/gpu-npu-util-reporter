@@ -468,6 +468,8 @@ async fn insert_records(
                     first_error = Some(format!("{e}"));
                 }
                 warn!("写入第 {} 行失败：{e}", row_idx + 1);
+                // 首次失败后立即跳出循环，避免浪费数据库往返
+                break;
             }
         }
     }
