@@ -733,7 +733,7 @@ fn strip_port(s: &str) -> String {
     if let Some((host, port)) = s.rsplit_once(':') {
         if !port.is_empty()
             && port.chars().all(|c| c.is_ascii_digit())
-            && (host.starts_with('[') || host.contains('.'))
+            && (host.starts_with('[') || (host.contains('.') && !host.contains(':')))
         {
             // 剥 IPv6 方括号：[::1]:9090 → ::1
             return host
@@ -1732,5 +1732,12 @@ mod tests {
     fn strip_port_bare_ipv6() {
         // 裸 IPv6 无端口，原样返回（无法区分地址内冒号与端口冒号）
         assert_eq!(strip_port("2001:db8::1"), "2001:db8::1");
+    }
+
+    #[test]
+    fn strip_port_ipv4_mapped_ipv6_not_stripped() {
+        // IPv4-mapped IPv6（如 ::ffff:192.168.1.1）不应被误判为 IPv4:port
+        // 旧版 host.contains('.') 会触发误剥，导致 IP 被截断
+        assert_eq!(strip_port("::ffff:192.168.1.1"), "::ffff:192.168.1.1");
     }
 }

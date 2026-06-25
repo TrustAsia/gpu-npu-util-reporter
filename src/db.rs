@@ -476,7 +476,9 @@ async fn insert_records(
 
     if count == 0 {
         // 全部失败：回滚事务
-        let _ = tx.rollback().await;
+        if let Err(e) = tx.rollback().await {
+            warn!("回滚事务失败：{e}");
+        }
         return Err(AppError::Database {
             detail: format!(
                 "所有 {total} 行写入均失败，首条错误：{e}",
@@ -490,11 +492,12 @@ async fn insert_records(
             "部分行写入失败：{count}/{} 行成功，回滚事务以保证数据一致性",
             records.len()
         );
-        let _ = tx.rollback().await;
+        let rollback_ok = tx.rollback().await.is_ok();
         return Err(AppError::Database {
             detail: format!(
-                "部分行写入失败（{count}/{} 成功），已回滚事务，首条错误：{e}",
+                "部分行写入失败（{count}/{} 成功），{}首条错误：{e}",
                 records.len(),
+                if rollback_ok { "已回滚事务，" } else { "回滚事务失败，数据可能不一致，" },
                 e = first_error.expect("first_error set when count < records.len()")
             ),
         });
