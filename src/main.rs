@@ -308,6 +308,7 @@ async fn main() -> ExitCode {
 
     // 构建动态基础列（含可选指标组）
     let base_columns = mapper::build_base_columns(column_flags);
+    let base_local_names = mapper::build_base_local_names(column_flags);
     let base_column_refs: Vec<&str> = base_columns.iter().map(String::as_str).collect();
 
     // 6. 渲染前稳定排序（I1）：必须在资产映射之前，保证 mapping_values 的行索引
@@ -424,6 +425,7 @@ async fn main() -> ExitCode {
                 db_cfg,
                 &mapping_values,
                 &base_columns,
+                &base_local_names,
                 &mapping_columns,
                 tz,
             )

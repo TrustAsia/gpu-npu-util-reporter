@@ -137,6 +137,7 @@ fn renders_report_with_mapping_columns() {
     let mapping_columns = vec![MappingColumn {
         source_field: "机房位置".into(),
         rename: "机房".into(),
+        local_name: None,
         position: InsertPosition {
             direction: Direction::After,
             anchor: "主机IP".into(),

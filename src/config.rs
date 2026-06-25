@@ -154,14 +154,19 @@ const fn default_step() -> u64 {
     60
 }
 
-/// 数据库列映射配置：本地列名 → 数据库列名 + 注释。
+/// 数据库列映射配置：本地字段名 → 数据库列名 + 类型 + 注释。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ColumnMapping {
-    /// 本地列名（报表中的列名，如"主机IP"、"核心利用率平均值"）。
+    /// 本地字段名（稳定标识符，如 "host_ip"、"core_avg"、"room" 等）。
+    /// 基础列使用预定义字段名，映射列使用 MappingColumn 中配置的 local_name。
     pub local_name: String,
     /// 数据库列名（如"host_ip"、"core_avg"）。
     pub db_name: String,
+    /// 数据库字段类型（如 "VARCHAR(255) DEFAULT NULL"、"DOUBLE DEFAULT NULL"、"DATETIME DEFAULT NULL"）。
+    /// 不指定时根据 local_name 自动推断。
+    #[serde(default)]
+    pub db_type: Option<String>,
     /// 数据库列注释（说明该列含义，如"主机IP地址"）。
     #[serde(default)]
     pub comment: String,
@@ -188,8 +193,8 @@ pub struct DatabaseConfig {
     pub database: String,
     /// 目标表名。
     pub table: String,
-    /// 列映射：本地列名 → 数据库列名 + 注释。
-    /// 未在此列表中的本地列不会写入数据库。
+    /// 列映射：本地字段名 → 数据库列名 + 类型 + 注释。
+    /// 未在此列表中的本地字段不会写入数据库。
     pub columns: Vec<ColumnMapping>,
 }
 
@@ -417,6 +422,9 @@ ownership:
 # columns 定义从资产表提取哪些列，以及它们插入报表的位置和显示名称：
 #   source_field — 资产表中的源列名
 #   rename       — 报表列显示名（可与 source_field 不同，如"机房位置"→"机房"）
+#   local_name   — 本地字段名（稳定标识符，用于映射到数据库列名，可选）
+#                  不指定时默认与 source_field 相同。建议显式指定以避免资产表列名
+#                  包含中文或特殊字符时导致数据库映射不便。
 #   position     — 插入位置
 #     direction  — after（在锚点列之后）或 before（在锚点列之前）
 #     anchor     — 锚点列名（报表现有列名，如 "主机IP"、"设备类型"等）
@@ -432,6 +440,7 @@ mapping:
       columns:
         - source_field: "机房位置"
           rename: "机房"
+          local_name: "room"
           position: { direction: after, anchor: "主机IP" }
 
 # =============================================================================
@@ -605,68 +614,117 @@ report:
 #   - 表存在但缺少配置中的列 → 停止运行并生成 DDL SQL 文件
 #   - 表中有多余的列（本地未配置）→ 询问用户：忽略多余列继续，或退出并生成 DDL
 #
-# columns 定义本地列名到数据库列名的映射：
-#   local_name — 报表中的列名（如"主机IP"、"核心利用率平均值"）
+# columns 定义本地字段名到数据库列名的映射：
+#   local_name — 本地字段名（稳定标识符，如 "host_ip"、"core_avg"）
+#                基础列使用预定义字段名，映射列使用 MappingColumn 中配置的 local_name
 #   db_name    — MySQL 表中的列名（如"host_ip"、"core_avg"）
+#   db_type    — MySQL 字段类型（可选，不指定时根据 local_name 自动推断）
+#                常用类型：VARCHAR(255) DEFAULT NULL、DOUBLE DEFAULT NULL、
+#                DATETIME DEFAULT NULL、INT DEFAULT NULL 等
 #   comment    — MySQL 列注释（说明该列含义，如"主机IP地址"）
 #
-# 未在 columns 中配置的本地列不会写入数据库。
-# 资产映射列（如"机房位置"）也可配置映射，与基础列同等对待。
+# 未在 columns 中配置的本地字段不会写入数据库。
+# 资产映射列（如"机房位置"）也可配置映射，local_name 使用 MappingColumn 中的 local_name。
 #
-#database:
-#  enabled: false
-#  host: "127.0.0.1"
-#  port: 3306
-#  username: "reporter"
-#  password: ""
-#  database: "gpu_npu_monitor"
-#  table: "utilization"
-#  columns:
-#    - local_name: "数据来源"
-#      db_name: "source_name"
-#      comment: "Prometheus数据源别名"
-#    - local_name: "主机IP"
-#      db_name: "host_ip"
-#      comment: "主机IP地址"
-#    - local_name: "节点名称"
-#      db_name: "node_name"
-#      comment: "Kubernetes节点名称"
-#    - local_name: "计算卡编号"
-#      db_name: "card_id"
-#      comment: "GPU/NPU设备编号"
-#    - local_name: "设备类型"
-#      db_name: "device_type"
-#      comment: "设备类型显示名"
-#    - local_name: "Namespace"
-#      db_name: "namespace"
-#      comment: "Kubernetes命名空间"
-#    - local_name: "Pod"
-#      db_name: "pod"
-#      comment: "Kubernetes Pod名称"
-#    - local_name: "容器名称"
-#      db_name: "container"
-#      comment: "容器名称"
-#    - local_name: "取值时间范围"
-#      db_name: "time_range"
-#      comment: "数据采集时间范围"
-#    - local_name: "核心利用率平均值"
-#      db_name: "core_avg"
-#      comment: "核心利用率平均值(0-100%)"
-#    - local_name: "核心利用率峰值"
-#      db_name: "core_peak"
-#      comment: "核心利用率峰值(0-100%)"
-#    - local_name: "核心利用率峰值出现时间"
-#      db_name: "core_peak_time"
-#      comment: "核心利用率峰值出现时间"
-#    - local_name: "显存占用率平均值"
-#      db_name: "mem_avg"
-#      comment: "显存占用率平均值(0-100%)"
-#    - local_name: "显存占用率峰值"
-#      db_name: "mem_peak"
-#      comment: "显存占用率峰值(0-100%)"
-#    - local_name: "显存占用率峰值出现时间"
-#      db_name: "mem_peak_time"
-#      comment: "显存占用率峰值出现时间"
+# ---- 基础列本地字段名参考 -----------------------------------------------
+# source_name       数据来源
+# host_ip           主机IP
+# node_name         节点名称
+# card_id           计算卡编号
+# device_type       设备类型
+# namespace         Namespace
+# pod               Pod
+# container         容器名称
+# time_range        取值时间范围
+# core_avg          核心利用率平均值
+# core_peak         核心利用率峰值
+# core_peak_time    核心利用率峰值出现时间
+# core_count        核心利用率数据量
+# core_first_time   核心利用率首条数据时间
+# core_last_time    核心利用率末条数据时间
+# mem_avg           显存占用率平均值
+# mem_peak          显存占用率峰值
+# mem_peak_time     显存占用率峰值出现时间
+# mem_count         显存占用率数据量
+# mem_first_time    显存占用率首条数据时间
+# mem_last_time     显存占用率末条数据时间
+# temp_avg          设备温度平均值
+# temp_peak         设备温度峰值
+# temp_peak_time    设备温度峰值出现时间
+# temp_count        设备温度数据量
+# temp_first_time   设备温度首条数据时间
+# temp_last_time    设备温度末条数据时间
+# power_avg         设备功率平均值
+# power_peak        设备功率峰值
+# power_peak_time   设备功率峰值出现时间
+# power_count       设备功率数据量
+# power_first_time  设备功率首条数据时间
+# power_last_time   设备功率末条数据时间
+# host_cpu_avg      主机CPU利用率平均值
+# host_cpu_peak     主机CPU利用率峰值
+# host_cpu_peak_time 主机CPU利用率峰值出现时间
+# host_mem_avg      主机内存利用率平均值
+# host_mem_peak     主机内存利用率峰值
+# host_mem_peak_time 主机内存利用率峰值出现时间
+# host_handle_avg   主机句柄数平均值
+# host_handle_peak  主机句柄数峰值
+# host_handle_peak_time 主机句柄数峰值出现时间
+#
+database:
+  enabled: false
+  host: "127.0.0.1"
+  port: 3306
+  username: "reporter"
+  password: ""
+  database: "gpu_npu_monitor"
+  table: "utilization"
+  columns:
+    - local_name: "source_name"
+      db_name: "source_name"
+      comment: "Prometheus数据源别名"
+    - local_name: "host_ip"
+      db_name: "host_ip"
+      comment: "主机IP地址"
+    - local_name: "node_name"
+      db_name: "node_name"
+      comment: "Kubernetes节点名称"
+    - local_name: "card_id"
+      db_name: "card_id"
+      comment: "GPU/NPU设备编号"
+    - local_name: "device_type"
+      db_name: "device_type"
+      comment: "设备类型显示名"
+    - local_name: "namespace"
+      db_name: "namespace"
+      comment: "Kubernetes命名空间"
+    - local_name: "pod"
+      db_name: "pod"
+      comment: "Kubernetes Pod名称"
+    - local_name: "container"
+      db_name: "container"
+      comment: "容器名称"
+    - local_name: "time_range"
+      db_name: "time_range"
+      db_type: "VARCHAR(64) DEFAULT NULL"
+      comment: "数据采集时间范围"
+    - local_name: "core_avg"
+      db_name: "core_avg"
+      comment: "核心利用率平均值(0-100%)"
+    - local_name: "core_peak"
+      db_name: "core_peak"
+      comment: "核心利用率峰值(0-100%)"
+    - local_name: "core_peak_time"
+      db_name: "core_peak_time"
+      comment: "核心利用率峰值出现时间"
+    - local_name: "mem_avg"
+      db_name: "mem_avg"
+      comment: "显存占用率平均值(0-100%)"
+    - local_name: "mem_peak"
+      db_name: "mem_peak"
+      comment: "显存占用率峰值(0-100%)"
+    - local_name: "mem_peak_time"
+      db_name: "mem_peak_time"
+      comment: "显存占用率峰值出现时间"
 "##;
     TEMPLATE
         .replace("__NVIDIA__", &indent_device(2, &nvidia_a10_spec()))
@@ -1021,11 +1079,23 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             // 校验列映射：db_name 必须是合法的 MySQL 列名
             let mut seen_db_names = std::collections::HashSet::new();
             let mut seen_local_names = std::collections::HashSet::new();
-            // 预构建映射列 rename 列表（用于 local_name 校验，避免循环内重复构建）
-            let mapping_renames: Vec<String> = cfg.mapping.as_ref()
+            // 预构建映射列 local_name 列表（用于 local_name 校验，避免循环内重复构建）
+            let mapping_local_names: Vec<String> = cfg.mapping.as_ref()
                 .and_then(|m| if m.enabled { Some(m) } else { None })
-                .map(|m| m.all_columns_owned().iter().map(|c| c.rename.clone()).collect())
+                .map(|m| m.all_columns_owned().iter().map(|c| c.effective_local_name()).collect())
                 .unwrap_or_default();
+            // 检测映射列 local_name 重复
+            if !mapping_local_names.is_empty() {
+                if let Some(m) = cfg.mapping.as_ref() {
+                    let dup_warnings = m.duplicate_local_name_warnings();
+                    if let Some(first) = dup_warnings.first() {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: first.clone(),
+                        });
+                    }
+                }
+            }
             for col in &db.columns {
                 if col.local_name.is_empty() {
                     return Err(AppError::Config {
@@ -1063,12 +1133,12 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                         reason: format!("database.columns 中 local_name「{}」重复", col.local_name),
                     });
                 }
-                // 校验 local_name 是否对应已知的基础列名或映射列 rename
-                if !is_known_base_column(&col.local_name) && !mapping_renames.iter().any(|r| r == &col.local_name) {
+                // 校验 local_name 是否对应已知的基础列本地字段名或映射列 local_name
+                if !is_known_base_local_name(&col.local_name) && !mapping_local_names.iter().any(|r| r == &col.local_name) {
                     return Err(AppError::Config {
                         path: path.into(),
                         reason: format!(
-                            "database.columns 中 local_name「{}」不匹配任何已知报表列名或映射列名（可能是拼写错误）",
+                            "database.columns 中 local_name「{}」不匹配任何已知基础字段名或映射列字段名（可能是拼写错误）",
                             col.local_name
                         ),
                     });
@@ -1183,21 +1253,21 @@ fn is_valid_mysql_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// 检查 local_name 是否对应已知的报表列名（基础列 + 可选列组）。
+/// 检查 local_name 是否对应已知的基础列本地字段名。
 ///
 /// 映射列（来自资产表）在配置校验时无法枚举，因此不在检查范围内。
-/// 此函数仅捕获基础列名的拼写错误。
-fn is_known_base_column(name: &str) -> bool {
+/// 此函数仅捕获基础列字段名的拼写错误。
+fn is_known_base_local_name(name: &str) -> bool {
     use crate::mapper::{
-        BASE_COLUMNS, TEMP_COLUMNS, POWER_COLUMNS,
-        HOST_CPU_COLUMNS, HOST_MEM_COLUMNS, HOST_HANDLE_COLUMNS,
+        CORE_BASE_LOCAL_NAMES, TEMP_LOCAL_NAMES, POWER_LOCAL_NAMES,
+        HOST_CPU_LOCAL_NAMES, HOST_MEM_LOCAL_NAMES, HOST_HANDLE_LOCAL_NAMES,
     };
-    BASE_COLUMNS.iter()
-        .chain(TEMP_COLUMNS.iter())
-        .chain(POWER_COLUMNS.iter())
-        .chain(HOST_CPU_COLUMNS.iter())
-        .chain(HOST_MEM_COLUMNS.iter())
-        .chain(HOST_HANDLE_COLUMNS.iter())
+    CORE_BASE_LOCAL_NAMES.iter()
+        .chain(TEMP_LOCAL_NAMES.iter())
+        .chain(POWER_LOCAL_NAMES.iter())
+        .chain(HOST_CPU_LOCAL_NAMES.iter())
+        .chain(HOST_MEM_LOCAL_NAMES.iter())
+        .chain(HOST_HANDLE_LOCAL_NAMES.iter())
         .any(|&c| c == name)
 }
 
@@ -1633,13 +1703,15 @@ mod tests {
             table: "util".into(),
             columns: vec![
                 ColumnMapping {
-                    local_name: "主机IP".into(),
+                    local_name: "host_ip".into(),
                     db_name: "host_ip".into(),
+                    db_type: None,
                     comment: "IP".into(),
                 },
                 ColumnMapping {
-                    local_name: "节点名称".into(),
+                    local_name: "node_name".into(),
                     db_name: "host_ip".into(), // 重复
+                    db_type: None,
                     comment: "Node".into(),
                 },
             ],
@@ -1660,12 +1732,79 @@ mod tests {
             database: "test".into(),
             table: "util".into(),
             columns: vec![ColumnMapping {
-                local_name: "主机IP".into(),
+                local_name: "host_ip".into(),
                 db_name: "host-ip".into(), // 连字符不合法
+                db_type: None,
                 comment: "IP".into(),
             }],
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "不合法 db_name 应被拒绝");
+    }
+
+    #[test]
+    fn database_config_rejects_unknown_local_name() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "nonexistent_field".into(),
+                db_name: "col".into(),
+                db_type: None,
+                comment: "unknown".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "未知的 local_name 应被拒绝");
+    }
+
+    #[test]
+    fn database_config_accepts_known_base_local_names() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "host_ip".into(),
+                db_name: "host_ip".into(),
+                db_type: None,
+                comment: "主机IP".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_ok(), "已知基础字段名应通过校验");
+    }
+
+    #[test]
+    fn database_config_accepts_custom_db_type() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "time_range".into(),
+                db_name: "time_range".into(),
+                db_type: Some("VARCHAR(128) NOT NULL".into()),
+                comment: "时间范围".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_ok(), "自定义 db_type 应通过校验");
     }
 }

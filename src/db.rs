@@ -4,6 +4,9 @@
 //! - 自动建表（含列注释）
 //! - schema 校验（缺列→生成DDL退出；多余列→询问用户）
 //! - 逐行 INSERT
+//!
+//! 列映射通过本地字段名（local_name）而非报表显示名进行，
+//! 确保映射不受显示名变化影响。用户可在配置中指定 db_type 覆盖自动推断。
 
 use crate::config::DatabaseConfig;
 use crate::error::AppError;
@@ -27,6 +30,7 @@ pub async fn push_to_database(
     cfg: &DatabaseConfig,
     mapping_values: &HashMap<(usize, String), String>,
     base_columns: &[String],
+    base_local_names: &[String],
     mapping_columns: &[crate::mapper::MappingColumn],
     tz: Tz,
 ) -> Result<(), AppError> {
@@ -35,31 +39,55 @@ pub async fn push_to_database(
         return Ok(());
     }
 
-    // 构建完整列顺序（与报表一致）
-    let base_refs: Vec<&str> = base_columns.iter().map(String::as_str).collect();
-    let order = crate::mapper::compute_column_order(&base_refs, mapping_columns);
-
-    // 构建 local_name → db_name + comment 的索引
-    let col_map: HashMap<&str, (&str, &str)> = cfg
-        .columns
+    // 构建 display_name → local_name 的映射（基础列 + 映射列）
+    // 先收集映射列的 effective_local_name 到 owned Vec，避免 leak
+    let mapping_local_names_owned: Vec<String> = mapping_columns
         .iter()
-        .map(|c| (c.local_name.as_str(), (c.db_name.as_str(), c.comment.as_str())))
+        .map(|c| c.effective_local_name())
+        .collect();
+    let display_to_local: HashMap<&str, &str> = base_columns
+        .iter()
+        .zip(base_local_names.iter())
+        .map(|(d, l)| (d.as_str(), l.as_str()))
+        .chain(
+            mapping_columns
+                .iter()
+                .zip(mapping_local_names_owned.iter())
+                .map(|(c, ln)| (c.rename.as_str(), ln.as_str())),
+        )
         .collect();
 
-    // 过滤出有映射的列（保持 order 顺序）
-    let mapped_cols: Vec<(&str, &str, &str)> = order
+    // 构建 local_name → db_name + db_type + comment 的索引
+    let col_map: HashMap<&str, (&str, Option<&str>, &str)> = cfg
+        .columns
         .iter()
-        .filter_map(|name| {
-            col_map
-                .get(name.as_str())
-                .map(|(db, cmt)| (name.as_str(), *db, *cmt))
+        .map(|c| {
+            (
+                c.local_name.as_str(),
+                (c.db_name.as_str(), c.db_type.as_deref(), c.comment.as_str()),
+            )
+        })
+        .collect();
+
+    // 过滤出有映射的列：按 order 中的显示列名 → local_name → db 映射
+    // mapped_cols: (display_name, local_name, db_name, db_type, comment)
+    let base_refs: Vec<&str> = base_columns.iter().map(String::as_str).collect();
+    let order = crate::mapper::compute_column_order(&base_refs, mapping_columns);
+    let mapped_cols: Vec<(&str, &str, &str, Option<&str>, &str)> = order
+        .iter()
+        .filter_map(|display_name| {
+            let local_name = display_to_local.get(display_name.as_str())?;
+            col_map.get(local_name).map(|(db, db_type, cmt)| {
+                (display_name.as_str(), *local_name, *db, *db_type, *cmt)
+            })
         })
         .collect();
 
     // 警告：配置了但不在当前活跃列中的映射（可能属于未启用的指标组）
     let configured_local_names: HashSet<&str> =
         cfg.columns.iter().map(|c| c.local_name.as_str()).collect();
-    let active_local_names: HashSet<&str> = order.iter().map(String::as_str).collect();
+    let active_local_names: HashSet<&str> =
+        display_to_local.values().copied().collect();
     for name in &configured_local_names - &active_local_names {
         warn!(
             "database.columns 中 local_name「{name}」不在当前活跃报表列中（可能属于未启用的指标组），已跳过"
@@ -68,7 +96,7 @@ pub async fn push_to_database(
 
     if mapped_cols.is_empty() {
         return Err(AppError::Database {
-            detail: "database.columns 中没有匹配任何本地列名的映射".into(),
+            detail: "database.columns 中没有匹配任何本地字段名的映射".into(),
         });
     }
 
@@ -157,7 +185,7 @@ fn atty_is_terminal() -> bool {
 async fn ensure_table(
     pool: &Pool<MySql>,
     cfg: &DatabaseConfig,
-    mapped_cols: &[(&str, &str, &str)],
+    mapped_cols: &[(&str, &str, &str, Option<&str>, &str)],
 ) -> Result<(), AppError> {
     let table_exists = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
@@ -187,7 +215,7 @@ async fn ensure_table(
     // 表存在：获取现有列
     let existing_columns = get_table_columns(pool, cfg).await?;
     let configured_db_names: HashSet<&str> =
-        mapped_cols.iter().map(|(_, db, _)| *db).collect();
+        mapped_cols.iter().map(|(_, _, db, _, _)| *db).collect();
     let existing_db_names: HashSet<&str> = existing_columns.keys().map(String::as_str).collect();
 
     // 检查缺少的列
@@ -309,10 +337,10 @@ fn escape_mysql_string(s: &str) -> String {
 }
 
 /// 生成 CREATE TABLE DDL。
-fn generate_create_ddl(cfg: &DatabaseConfig, mapped_cols: &[(&str, &str, &str)]) -> String {
+fn generate_create_ddl(cfg: &DatabaseConfig, mapped_cols: &[(&str, &str, &str, Option<&str>, &str)]) -> String {
     let mut lines = Vec::new();
-    for (local_name, db_name, comment) in mapped_cols {
-        let sql_type = infer_sql_type(local_name);
+    for (_display_name, local_name, db_name, db_type, comment) in mapped_cols {
+        let sql_type = db_type.unwrap_or_else(|| infer_sql_type(local_name));
         let comment_escaped = escape_mysql_string(comment);
         lines.push(format!(
             "  `{db_name}` {sql_type} COMMENT '{comment_escaped}'"
@@ -328,13 +356,13 @@ fn generate_create_ddl(cfg: &DatabaseConfig, mapped_cols: &[(&str, &str, &str)])
 /// 生成 ALTER TABLE DDL（添加缺少的列）。
 fn generate_alter_ddl(
     cfg: &DatabaseConfig,
-    mapped_cols: &[(&str, &str, &str)],
+    mapped_cols: &[(&str, &str, &str, Option<&str>, &str)],
     missing: &[&str],
 ) -> String {
     let mut lines = Vec::new();
-    for (local_name, db_name, comment) in mapped_cols {
+    for (_display_name, local_name, db_name, db_type, comment) in mapped_cols {
         if missing.contains(db_name) {
-            let sql_type = infer_sql_type(local_name);
+            let sql_type = db_type.unwrap_or_else(|| infer_sql_type(local_name));
             let comment_escaped = escape_mysql_string(comment);
             lines.push(format!(
                 "ADD COLUMN `{db_name}` {sql_type} COMMENT '{comment_escaped}'"
@@ -348,26 +376,28 @@ fn generate_alter_ddl(
     )
 }
 
-/// 根据本地列名推断 MySQL 数据类型。
+/// 根据本地字段名推断 MySQL 数据类型。
+///
+/// 字段名是稳定标识符（如 "time_range"、"core_avg"），不受显示名变化影响。
 fn infer_sql_type(local_name: &str) -> &'static str {
-    // 时间范围 → VARCHAR（"取值时间范围"是文本，不是单个时间点）
-    if local_name.contains("时间范围") {
+    // 时间范围 → VARCHAR（"time_range" 是文本，不是单个时间点）
+    if local_name == "time_range" || local_name.ends_with("_range") {
         return "VARCHAR(64) DEFAULT NULL";
     }
-    // 时间列 → DATETIME（必须在句柄数/峰值检查之前，否则"主机句柄数峰值出现时间"误判为 DOUBLE）
-    if local_name.contains("时间") {
+    // 时间列 → DATETIME
+    if local_name.ends_with("_time") {
         return "DATETIME DEFAULT NULL";
     }
     // 数据量 → INT
-    if local_name.contains("数据量") {
+    if local_name.ends_with("_count") {
         return "INT DEFAULT NULL";
     }
     // 句柄数 → DOUBLE（可能是非整数）
-    if local_name.contains("句柄数") {
+    if local_name.starts_with("host_handle_") && !local_name.ends_with("_time") && !local_name.ends_with("_count") {
         return "DOUBLE DEFAULT NULL";
     }
-    // 百分比/绝对值列 → DOUBLE
-    if local_name.contains("平均值") || local_name.contains("峰值") {
+    // 百分比/绝对值列 → DOUBLE（avg/peak 后缀）
+    if local_name.ends_with("_avg") || local_name.ends_with("_peak") {
         return "DOUBLE DEFAULT NULL";
     }
     // 文本列 → VARCHAR
@@ -379,7 +409,7 @@ async fn insert_records(
     pool: &Pool<MySql>,
     cfg: &DatabaseConfig,
     records: &[CardRecord],
-    mapped_cols: &[(&str, &str, &str)],
+    mapped_cols: &[(&str, &str, &str, Option<&str>, &str)],
     mapping_values: &HashMap<(usize, String), String>,
     tz: Tz,
 ) -> Result<usize, AppError> {
@@ -390,7 +420,7 @@ async fn insert_records(
         .collect();
 
     // 构建列名和占位符
-    let db_names: Vec<&str> = mapped_cols.iter().map(|(_, db, _)| *db).collect();
+    let db_names: Vec<&str> = mapped_cols.iter().map(|(_, _, db, _, _)| *db).collect();
     let placeholders: Vec<&str> = mapped_cols.iter().map(|_| "?").collect();
 
     let sql = format!(
@@ -408,11 +438,11 @@ async fn insert_records(
     let mut count = 0usize;
     let mut first_error: Option<String> = None;
     for (row_idx, rec) in records.iter().enumerate() {
-        // 构建该行的值（按 mapped_cols 顺序）
+        // 构建该行的值（按 mapped_cols 顺序，使用 display_name 取值）
         let values: Vec<Option<String>> = mapped_cols
             .iter()
-            .map(|(local_name, _db_name, _comment)| {
-                crate::reporter::cell_value_for_db(rec, local_name, &mapping_borrowed, row_idx, tz)
+            .map(|(display_name, _local_name, _db_name, _db_type, _comment)| {
+                crate::reporter::cell_value_for_db(rec, display_name, &mapping_borrowed, row_idx, tz)
             })
             .collect();
 
@@ -483,41 +513,41 @@ mod tests {
 
     #[test]
     fn infer_sql_type_pct_columns() {
-        assert_eq!(infer_sql_type("核心利用率平均值"), "DOUBLE DEFAULT NULL");
-        assert_eq!(infer_sql_type("显存占用率峰值"), "DOUBLE DEFAULT NULL");
-        assert_eq!(infer_sql_type("主机CPU利用率平均值"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("core_avg"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("mem_peak"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_cpu_avg"), "DOUBLE DEFAULT NULL");
     }
 
     #[test]
     fn infer_sql_type_number_columns() {
-        assert_eq!(infer_sql_type("设备温度平均值"), "DOUBLE DEFAULT NULL");
-        assert_eq!(infer_sql_type("设备功率峰值"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("temp_avg"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("power_peak"), "DOUBLE DEFAULT NULL");
     }
 
     #[test]
     fn infer_sql_type_count_columns() {
-        assert_eq!(infer_sql_type("核心利用率数据量"), "INT DEFAULT NULL");
-        assert_eq!(infer_sql_type("显存占用率数据量"), "INT DEFAULT NULL");
+        assert_eq!(infer_sql_type("core_count"), "INT DEFAULT NULL");
+        assert_eq!(infer_sql_type("mem_count"), "INT DEFAULT NULL");
     }
 
     #[test]
     fn infer_sql_type_time_columns() {
-        assert_eq!(infer_sql_type("核心利用率峰值出现时间"), "DATETIME DEFAULT NULL");
-        assert_eq!(infer_sql_type("主机CPU利用率峰值出现时间"), "DATETIME DEFAULT NULL");
-        assert_eq!(infer_sql_type("主机句柄数峰值出现时间"), "DATETIME DEFAULT NULL");
+        assert_eq!(infer_sql_type("core_peak_time"), "DATETIME DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_cpu_peak_time"), "DATETIME DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_handle_peak_time"), "DATETIME DEFAULT NULL");
     }
 
     #[test]
     fn infer_sql_type_handle_columns() {
-        assert_eq!(infer_sql_type("主机句柄数平均值"), "DOUBLE DEFAULT NULL");
-        assert_eq!(infer_sql_type("主机句柄数峰值"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_handle_avg"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_handle_peak"), "DOUBLE DEFAULT NULL");
     }
 
     #[test]
     fn infer_sql_type_text_columns() {
-        assert_eq!(infer_sql_type("数据来源"), "VARCHAR(255) DEFAULT NULL");
-        assert_eq!(infer_sql_type("主机IP"), "VARCHAR(255) DEFAULT NULL");
-        assert_eq!(infer_sql_type("取值时间范围"), "VARCHAR(64) DEFAULT NULL");
+        assert_eq!(infer_sql_type("source_name"), "VARCHAR(255) DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_ip"), "VARCHAR(255) DEFAULT NULL");
+        assert_eq!(infer_sql_type("time_range"), "VARCHAR(64) DEFAULT NULL");
     }
 
     #[test]
@@ -543,8 +573,8 @@ mod tests {
             columns: vec![],
         };
         let cols = vec![
-            ("主机IP", "host_ip", "主机IP地址"),
-            ("核心利用率平均值", "core_avg", "核心利用率平均值"),
+            ("主机IP", "host_ip", "host_ip", None, "主机IP地址"),
+            ("核心利用率平均值", "core_avg", "core_avg", None, "核心利用率平均值"),
         ];
         let ddl = generate_create_ddl(&cfg, &cols);
         assert!(ddl.starts_with("CREATE TABLE `gpu_util`"));
@@ -552,5 +582,24 @@ mod tests {
         assert!(ddl.contains("`core_avg` DOUBLE"));
         assert!(ddl.contains("COMMENT '主机IP地址'"));
         assert!(ddl.contains("ENGINE=InnoDB"));
+    }
+
+    #[test]
+    fn generate_create_ddl_with_custom_type() {
+        let cfg = DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "gpu_util".into(),
+            columns: vec![],
+        };
+        let cols = vec![
+            ("取值时间范围", "time_range", "time_range", Some("VARCHAR(128) DEFAULT NULL"), "数据采集时间范围"),
+        ];
+        let ddl = generate_create_ddl(&cfg, &cols);
+        assert!(ddl.contains("`time_range` VARCHAR(128) DEFAULT NULL"));
     }
 }

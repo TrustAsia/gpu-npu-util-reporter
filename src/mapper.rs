@@ -46,6 +46,34 @@ const CORE_BASE_COLUMNS: &[&str] = &[
     "显存占用率末条数据时间",
 ];
 
+/// 核心基础列对应的本地字段名（与 CORE_BASE_COLUMNS 一一对应）。
+///
+/// 本地字段名是列的稳定标识符，用于配置映射到数据库列名和字段类型，
+/// 不受报表显示名变化影响。
+pub const CORE_BASE_LOCAL_NAMES: &[&str] = &[
+    "source_name",
+    "host_ip",
+    "node_name",
+    "card_id",
+    "device_type",
+    "namespace",
+    "pod",
+    "container",
+    "time_range",
+    "core_avg",
+    "core_peak",
+    "core_peak_time",
+    "core_count",
+    "core_first_time",
+    "core_last_time",
+    "mem_avg",
+    "mem_peak",
+    "mem_peak_time",
+    "mem_count",
+    "mem_first_time",
+    "mem_last_time",
+];
+
 /// 设备温度列（按温度指标配置时出现）。
 pub const TEMP_COLUMNS: &[&str] = &[
     "设备温度平均值",
@@ -54,6 +82,16 @@ pub const TEMP_COLUMNS: &[&str] = &[
     "设备温度数据量",
     "设备温度首条数据时间",
     "设备温度末条数据时间",
+];
+
+/// 设备温度列对应的本地字段名。
+pub const TEMP_LOCAL_NAMES: &[&str] = &[
+    "temp_avg",
+    "temp_peak",
+    "temp_peak_time",
+    "temp_count",
+    "temp_first_time",
+    "temp_last_time",
 ];
 
 /// 设备功率列（按功率指标配置时出现）。
@@ -66,11 +104,28 @@ pub const POWER_COLUMNS: &[&str] = &[
     "设备功率末条数据时间",
 ];
 
+/// 设备功率列对应的本地字段名。
+pub const POWER_LOCAL_NAMES: &[&str] = &[
+    "power_avg",
+    "power_peak",
+    "power_peak_time",
+    "power_count",
+    "power_first_time",
+    "power_last_time",
+];
+
 /// 主机 CPU 列（启用主机指标时出现）。
 pub const HOST_CPU_COLUMNS: &[&str] = &[
     "主机CPU利用率平均值",
     "主机CPU利用率峰值",
     "主机CPU利用率峰值出现时间",
+];
+
+/// 主机 CPU 列对应的本地字段名。
+pub const HOST_CPU_LOCAL_NAMES: &[&str] = &[
+    "host_cpu_avg",
+    "host_cpu_peak",
+    "host_cpu_peak_time",
 ];
 
 /// 主机内存列（启用主机指标时出现）。
@@ -80,11 +135,25 @@ pub const HOST_MEM_COLUMNS: &[&str] = &[
     "主机内存利用率峰值出现时间",
 ];
 
+/// 主机内存列对应的本地字段名。
+pub const HOST_MEM_LOCAL_NAMES: &[&str] = &[
+    "host_mem_avg",
+    "host_mem_peak",
+    "host_mem_peak_time",
+];
+
 /// 主机句柄数列（启用主机指标且配置了 handle_metric 时出现）。
 pub const HOST_HANDLE_COLUMNS: &[&str] = &[
     "主机句柄数平均值",
     "主机句柄数峰值",
     "主机句柄数峰值出现时间",
+];
+
+/// 主机句柄数列对应的本地字段名。
+pub const HOST_HANDLE_LOCAL_NAMES: &[&str] = &[
+    "host_handle_avg",
+    "host_handle_peak",
+    "host_handle_peak_time",
 ];
 
 /// 标志位：哪些可选指标组应出现在基础列中。
@@ -119,6 +188,50 @@ pub fn build_base_columns(flags: ColumnFlags) -> Vec<String> {
         cols.extend(HOST_HANDLE_COLUMNS.iter().map(|s| (*s).to_string()));
     }
     cols
+}
+
+/// 根据配置构建基础列本地字段名有序清单（与 [`build_base_columns`] 一一对应）。
+#[must_use]
+pub fn build_base_local_names(flags: ColumnFlags) -> Vec<String> {
+    let mut names: Vec<String> = CORE_BASE_LOCAL_NAMES.iter().map(|s| (*s).to_string()).collect();
+    if flags.has_temp {
+        names.extend(TEMP_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_power {
+        names.extend(POWER_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_host_cpu {
+        names.extend(HOST_CPU_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_host_mem {
+        names.extend(HOST_MEM_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+    }
+    if flags.has_host_handle {
+        names.extend(HOST_HANDLE_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+    }
+    names
+}
+
+/// 根据报表显示列名查找对应的本地字段名。
+///
+/// 基础列通过预定义映射查找；映射列通过 `MappingColumn.local_name` 查找。
+/// 未找到时返回 `None`。
+#[must_use]
+pub fn local_name_for_column(
+    display_name: &str,
+    base_columns: &[String],
+    base_local_names: &[String],
+    mapping_columns: &[MappingColumn],
+) -> Option<String> {
+    // 先在基础列中查找
+    if let Some(idx) = base_columns.iter().position(|c| c == display_name) {
+        return base_local_names.get(idx).cloned();
+    }
+    // 再在映射列中查找
+    mapping_columns
+        .iter()
+        .find(|c| c.rename == display_name)
+        .map(|c| c.effective_local_name())
 }
 
 /// 向后兼容：默认基础列（仅核心列，不含可选指标组）。
@@ -170,8 +283,12 @@ impl InsertPosition {
 pub struct MappingColumn {
     /// 资产表源列名。
     pub source_field: String,
-    /// 注入后的新列名。
+    /// 注入后的新列名（报表显示名）。
     pub rename: String,
+    /// 本地字段名（稳定标识符，用于映射到数据库列名，不受显示名变化影响）。
+    /// 不指定时默认与 `source_field` 相同。
+    #[serde(default)]
+    pub local_name: Option<String>,
     /// 插入位置。
     pub position: InsertPosition,
 }
@@ -248,6 +365,37 @@ impl MappingConfig {
             .into_iter()
             .map(|r| format!("映射列 rename「{r}」在多个来源中重复，将导致数据覆盖"))
             .collect()
+    }
+
+    /// 检测所有来源中是否存在重复的 local_name，返回警告列表。
+    /// 重复 local_name 会导致数据库映射歧义，应在配置阶段拒绝。
+    #[must_use]
+    pub fn duplicate_local_name_warnings(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut dupes = Vec::new();
+        for col in self.sources.iter().flat_map(|s| &s.columns) {
+            let ln = col.effective_local_name();
+            if !seen.insert(ln.clone()) {
+                dupes.push(ln);
+            }
+        }
+        dupes.sort();
+        dupes.dedup();
+        dupes
+            .into_iter()
+            .map(|r| format!("映射列 local_name「{r}」在多个来源中重复，将导致数据库映射歧义"))
+            .collect()
+    }
+}
+
+impl MappingColumn {
+    /// 获取有效的本地字段名：显式配置时使用 `local_name`，否则回退到 `source_field`。
+    #[must_use]
+    pub fn effective_local_name(&self) -> String {
+        self.local_name
+            .as_deref()
+            .unwrap_or(&self.source_field)
+            .to_string()
     }
 }
 
@@ -621,11 +769,13 @@ mod tests {
             MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
+                local_name: None,
                 position: InsertPosition::after("主机IP"),
             },
             MappingColumn {
                 source_field: "负责人".into(),
                 rename: "负责人".into(),
+                local_name: None,
                 position: InsertPosition::after("主机IP"),
             },
         ];
@@ -642,6 +792,7 @@ mod tests {
         let cols = vec![MappingColumn {
             source_field: "x".into(),
             rename: "X".into(),
+            local_name: None,
             position: InsertPosition::before("设备类型"),
         }];
         let order = compute_column_order(BASE_COLUMNS, &cols);
@@ -655,6 +806,7 @@ mod tests {
         let cols = vec![MappingColumn {
             source_field: "x".into(),
             rename: "X".into(),
+            local_name: None,
             position: InsertPosition::after("不存在"),
         }];
         let order = compute_column_order(BASE_COLUMNS, &cols);
@@ -670,11 +822,13 @@ mod tests {
             MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
+                local_name: None,
                 position: InsertPosition::after("不存在"), // 缺失锚点，应追加到末尾
             },
             MappingColumn {
                 source_field: "负责人".into(),
                 rename: "负责人".into(),
+                local_name: None,
                 position: InsertPosition::after(*last_base), // 有效锚点，最后一列之后
             },
         ];
@@ -698,6 +852,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
+                local_name: None,
                 position: InsertPosition::after("主机IP"),
             }],
         };
@@ -726,6 +881,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
+                local_name: None,
                 position: InsertPosition::after("主机IP"),
             }],
         };
@@ -753,6 +909,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
+                local_name: None,
                 position: InsertPosition::after("主机IP"),
             }],
         };
@@ -781,6 +938,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
+                local_name: None,
                 position: InsertPosition::after("主机IP"),
             }],
         };
@@ -792,6 +950,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "负责人".into(),
                 rename: "负责人".into(),
+                local_name: None,
                 position: InsertPosition::after("机房"),
             }],
         };
@@ -829,6 +988,7 @@ mod tests {
             columns: vec![MappingColumn {
                 source_field: "负责人".into(),
                 rename: "负责人".into(),
+                local_name: None,
                 position: InsertPosition::after("机房"),
             }],
         };
@@ -852,11 +1012,13 @@ mod tests {
             MappingColumn {
                 source_field: "机房".into(),
                 rename: "机房".into(),
+                local_name: None,
                 position: InsertPosition::after("主机IP"), // 合法（基础列）
             },
             MappingColumn {
                 source_field: "x".into(),
                 rename: "X".into(),
+                local_name: None,
                 position: InsertPosition::after("不存在"), // 非法
             },
         ];
@@ -871,6 +1033,7 @@ mod tests {
         let cols = vec![MappingColumn {
             source_field: "机房".into(),
             rename: "机房".into(),
+            local_name: None,
             position: InsertPosition::before("设备类型"),
         }];
         assert!(missing_anchor_warnings(BASE_COLUMNS, &cols).is_empty());
@@ -957,6 +1120,7 @@ mod tests {
                     columns: vec![MappingColumn {
                         source_field: "room".into(),
                         rename: "机房".into(),
+                        local_name: None,
                         position: InsertPosition::after("主机IP"),
                     }],
                 },
@@ -968,6 +1132,7 @@ mod tests {
                     columns: vec![MappingColumn {
                         source_field: "location".into(),
                         rename: "机房".into(), // 与第一个来源重复
+                        local_name: None,
                         position: InsertPosition::after("主机IP"),
                     }],
                 },
@@ -990,6 +1155,7 @@ mod tests {
                 columns: vec![MappingColumn {
                     source_field: "room".into(),
                     rename: "机房".into(),
+                    local_name: None,
                     position: InsertPosition::after("主机IP"),
                 }],
             }],
