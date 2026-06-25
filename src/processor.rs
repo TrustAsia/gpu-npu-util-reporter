@@ -178,12 +178,20 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
 /// 调用方应：先尝试 `aggregate(direct.points)`；为空时再调用本函数并聚合结果。
 #[must_use]
 pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
-    // 按 timestamp 对齐 used 与 total
-    let total_map: std::collections::HashMap<i64, f64> = total
-        .points
-        .iter()
-        .map(|(ts, v)| (ts.timestamp(), *v))
-        .collect();
+    // 按 timestamp 对齐 used 与 total。
+    // 显式去重：同一 timestamp 保留最大值（与 merge_points_into 语义一致），
+    // 避免依赖 HashMap::collect 的隐式"保留最后"行为。
+    let mut total_map: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    for (ts, v) in &total.points {
+        total_map
+            .entry(ts.timestamp())
+            .and_modify(|existing| {
+                if *v > *existing {
+                    *existing = *v;
+                }
+            })
+            .or_insert(*v);
+    }
     let mut points = Vec::new();
     for (ts, u) in &used.points {
         if let Some(tot) = total_map.get(&ts.timestamp()) {

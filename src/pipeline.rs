@@ -441,9 +441,10 @@ async fn query_host_metric_value(
     match ctx.fetcher.query_range(promql, ctx.start, ctx.end, ctx.step).await {
         Ok(series) => {
             // 收集所有 series 的点（不去重），按时间戳分组取均值
+            // 防御性过滤：与 aggregate 一致，先排除 NaN/Inf 避免均值被污染。
             let mut all_points: Vec<(DateTime<Utc>, f64)> = Vec::new();
             for s in &series {
-                all_points.extend_from_slice(&s.points);
+                all_points.extend(s.points.iter().copied().filter(|(_, v)| v.is_finite()));
             }
             if all_points.is_empty() {
                 return (None, None, None);
@@ -661,11 +662,18 @@ async fn fallback_composite_ratio(
 /// 按 timestamp 对齐：仅保留 used 和 free 都有数据的时间戳，
 /// total 值 = used + free。保留 used 的标签（身份标签已由 join key 对齐）。
 fn synthesize_total(used: &Series, free: &Series) -> Series {
-    let free_map: HashMap<i64, f64> = free
-        .points
-        .iter()
-        .map(|(ts, v)| (ts.timestamp(), *v))
-        .collect();
+    // 显式去重：同一 timestamp 保留最大值（与 merge_points_into 语义一致）。
+    let mut free_map: HashMap<i64, f64> = HashMap::new();
+    for (ts, v) in &free.points {
+        free_map
+            .entry(ts.timestamp())
+            .and_modify(|existing| {
+                if *v > *existing {
+                    *existing = *v;
+                }
+            })
+            .or_insert(*v);
+    }
     let mut points = Vec::new();
     for (ts, u) in &used.points {
         if let Some(f) = free_map.get(&ts.timestamp()) {
