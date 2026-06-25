@@ -290,6 +290,36 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_all_nan_returns_none() {
+        let pts = vec![(t(0), f64::NAN), (t(60), f64::NAN)];
+        assert!(aggregate(&pts).is_none(), "全 NaN 输入应返回 None");
+    }
+
+    #[test]
+    fn aggregate_all_inf_returns_none() {
+        let pts = vec![(t(0), f64::INFINITY), (t(60), f64::NEG_INFINITY)];
+        assert!(aggregate(&pts).is_none(), "全 Inf 输入应返回 None");
+    }
+
+    #[test]
+    fn aggregate_filters_nan_keeps_finite() {
+        let pts = vec![(t(0), 10.0), (t(60), f64::NAN), (t(120), 30.0)];
+        let s = aggregate(&pts).unwrap();
+        assert!((s.avg - 20.0).abs() < 1e-9, "应忽略 NaN，仅对有限值求均值");
+        assert!((s.peak - 30.0).abs() < 1e-9);
+        assert_eq!(s.count, 2);
+    }
+
+    #[test]
+    fn aggregate_filters_inf_keeps_finite() {
+        let pts = vec![(t(0), f64::INFINITY), (t(60), 50.0), (t(120), f64::NEG_INFINITY)];
+        let s = aggregate(&pts).unwrap();
+        assert!((s.avg - 50.0).abs() < 1e-9, "应忽略 Inf，仅对有限值求均值");
+        assert!((s.peak - 50.0).abs() < 1e-9);
+        assert_eq!(s.count, 1);
+    }
+
+    #[test]
     fn last_non_empty_all_empty_returns_empty() {
         let pts = vec![(t(0), String::new()), (t(60), String::new())];
         assert_eq!(last_non_empty(&pts), "");
