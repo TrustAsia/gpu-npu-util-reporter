@@ -201,20 +201,29 @@ pub async fn collect_device(
         merge_into(power_by_key.entry(key).or_default(), s);
     }
 
+    // 将仅有温度/功率数据但无核心/显存数据的卡加入 groups，避免丢失。
+    // 这种情况在温度指标来自独立抓取作业、而核心/显存数据缺失时可能出现。
+    for key in temp_by_key.keys().chain(power_by_key.keys()) {
+        groups.entry(key.clone()).or_insert((None, None));
+    }
+
     // 稳定排序：按 key 升序输出，避免 HashMap 随机序。
     let mut keys: Vec<String> = groups.keys().cloned().collect();
     keys.sort();
 
     for key in keys {
         let (core, mem) = groups.remove(&key).unwrap_or((None, None));
-        // I7：core 与 mem 都为 None 不应发生（至少有一路数据才会进入 groups）；
-        // 防御性跳过避免幽灵行。
-        if core.is_none() && mem.is_none() {
-            continue;
-        }
+        // core 与 mem 都为 None 时，仍需保留该行（可能有温度/功率数据），
+        // 身份字段从温度/功率序列中提取。
 
-        // 身份字段优先从 core 取，core 缺失则从 mem 取。
-        let id_series = core.as_ref().or(mem.as_ref());
+        // 身份字段优先从 core 取，core 缺失则从 mem 取，再缺失则从温度/功率取。
+        let temp_opt = temp_by_key.get(&key).and_then(|o| o.as_ref());
+        let power_opt = power_by_key.get(&key).and_then(|o| o.as_ref());
+        let id_series = core
+            .as_ref()
+            .or(mem.as_ref())
+            .or(temp_opt)
+            .or(power_opt);
         let host_ip = id_series
             .map(|s| extract_ip(&s.labels, &ctx.spec.labels.host_ip))
             .unwrap_or_default();
@@ -232,11 +241,9 @@ pub async fn collect_device(
             .as_ref()
             .map_or((None, None, None, None, None, None), |m| stat3(&m.points));
 
-        // 温度/功率：按 key 从独立分组中取
-        let temp_opt = temp_by_key.get(&key).and_then(|o| o.as_ref());
+        // 温度/功率：按 key 从独立分组中取（temp_opt/power_opt 已在上方提取）
         let (t_avg, t_peak, t_peak_t, t_count, t_first, t_last) =
             temp_opt.map_or((None, None, None, None, None, None), |s| stat3(&s.points));
-        let power_opt = power_by_key.get(&key).and_then(|o| o.as_ref());
         let (p_avg, p_peak, p_peak_t, p_count, p_first, p_last) =
             power_opt.map_or((None, None, None, None, None, None), |s| stat3(&s.points));
 
@@ -548,12 +555,14 @@ async fn query_with_ip_fallback(
             // 含特殊字符的标签值。IPv6 方括号需单独处理。
             let ip_regex_escaped = escape_promql_regex(host_ip);
             let ip_regex = if host_ip.contains(':') {
-                // IPv6：instance 为 [ip]:port，正则需匹配字面方括号。
+                // IPv6：instance 为 [ip]:port 或 [ip]，正则需匹配字面方括号。
                 // Go 字符串字面量中 \\\\ 解析为 \\，RE2 将 \\[ 视为字面 [。
                 // Rust "\\\\[" = 3字符 "\\["，嵌入 PromQL 后 Go 解析为 "\["，RE2 匹配字面 [。
-                format!("^\\\\[{ip_regex_escaped}\\\\]:")
+                // ($|:) 匹配行尾或冒号（有/无端口均可）。
+                format!("^\\\\[{ip_regex_escaped}\\\\]($|:)")
             } else {
-                format!("^{ip_regex_escaped}:")
+                // IPv4：精确匹配 IP 后跟行尾或冒号（有/无端口均可）。
+                format!("^{ip_regex_escaped}($|:)")
             };
             let instance_promql = format!(
                 "{metric}{{{a}=\"{v}\",instance=~\"{ip_re}\"}}",
