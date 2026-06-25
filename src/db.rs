@@ -56,6 +56,16 @@ pub async fn push_to_database(
         })
         .collect();
 
+    // 警告：配置了但不在当前活跃列中的映射（可能属于未启用的指标组）
+    let configured_local_names: HashSet<&str> =
+        cfg.columns.iter().map(|c| c.local_name.as_str()).collect();
+    let active_local_names: HashSet<&str> = order.iter().map(String::as_str).collect();
+    for name in &configured_local_names - &active_local_names {
+        warn!(
+            "database.columns 中 local_name「{name}」不在当前活跃报表列中（可能属于未启用的指标组），已跳过"
+        );
+    }
+
     if mapped_cols.is_empty() {
         return Err(AppError::Database {
             detail: "database.columns 中没有匹配任何本地列名的映射".into(),

@@ -1021,6 +1021,11 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             // 校验列映射：db_name 必须是合法的 MySQL 列名
             let mut seen_db_names = std::collections::HashSet::new();
             let mut seen_local_names = std::collections::HashSet::new();
+            // 预构建映射列 rename 列表（用于 local_name 校验，避免循环内重复构建）
+            let mapping_renames: Vec<String> = cfg.mapping.as_ref()
+                .and_then(|m| if m.enabled { Some(m) } else { None })
+                .map(|m| m.all_columns_owned().iter().map(|c| c.rename.clone()).collect())
+                .unwrap_or_default();
             for col in &db.columns {
                 if col.local_name.is_empty() {
                     return Err(AppError::Config {
@@ -1059,10 +1064,6 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     });
                 }
                 // 校验 local_name 是否对应已知的基础列名或映射列 rename
-                let mapping_renames: Vec<String> = cfg.mapping.as_ref()
-                    .and_then(|m| if m.enabled { Some(m) } else { None })
-                    .map(|m| m.all_columns_owned().iter().map(|c| c.rename.clone()).collect())
-                    .unwrap_or_default();
                 if !is_known_base_column(&col.local_name) && !mapping_renames.iter().any(|r| r == &col.local_name) {
                     return Err(AppError::Config {
                         path: path.into(),

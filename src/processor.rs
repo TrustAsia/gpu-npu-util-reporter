@@ -138,20 +138,29 @@ pub fn aggregate(points: &[(DateTime<Utc>, f64)]) -> Option<MetricStats> {
     if points.is_empty() {
         return None;
     }
-    let count = points.len();
-    let sum: f64 = points.iter().map(|(_, v)| *v).sum();
+    // 过滤非有限值（NaN/Inf），防止下游写入数据库时产生 "NaN"/"inf" 字符串
+    let finite_points: Vec<(DateTime<Utc>, f64)> = points
+        .iter()
+        .filter(|(_, v)| v.is_finite())
+        .copied()
+        .collect();
+    if finite_points.is_empty() {
+        return None;
+    }
+    let count = finite_points.len();
+    let sum: f64 = finite_points.iter().map(|(_, v)| *v).sum();
     #[allow(clippy::cast_precision_loss)]
     let avg = sum / count as f64;
     // 取最大值；并列取最早时间戳（va 相同时 tb 越小越优先 → .then(tb.cmp(ta))）。
     // max_by 对非空迭代器必返回 Some；这里用 match 显式处理，避免 expect/panic。
-    let best = points.iter().copied().max_by(|(ta, va), (tb, vb)| {
+    let best = finite_points.iter().copied().max_by(|(ta, va), (tb, vb)| {
         va.partial_cmp(vb)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(tb.cmp(ta))
     });
     // 首/末数据时间：按时间戳排序取最早和最晚
-    let first_time = points.iter().map(|(ts, _)| *ts).min().unwrap(); // 非空迭代器，min 必返回 Some
-    let last_time = points.iter().map(|(ts, _)| *ts).max().unwrap();
+    let first_time = finite_points.iter().map(|(ts, _)| *ts).min().unwrap(); // 非空迭代器，min 必返回 Some
+    let last_time = finite_points.iter().map(|(ts, _)| *ts).max().unwrap();
     best.map(|(peak_time, peak)| MetricStats {
         avg,
         peak,
