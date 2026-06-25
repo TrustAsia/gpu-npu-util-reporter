@@ -356,6 +356,7 @@ pub(crate) fn cell_value_for_db(
         CellValue::Pct(p) => Some(format!("{p:.2}")),
         CellValue::Number(n) => Some(format!("{n:.2}")),
         CellValue::Count(n) => Some(n.to_string()),
+        CellValue::Text(t) if t.is_empty() => None, // 空文本 → 数据库 NULL（区分"无数据"和"空字符串"）
         CellValue::Text(t) => Some(t),
         CellValue::Na => None,
     }
@@ -468,5 +469,79 @@ mod tests {
         assert_eq!(sanitize_excel_text("hello"), "hello");
         assert_eq!(sanitize_excel_text("192.168.1.1"), "192.168.1.1");
         assert_eq!(sanitize_excel_text(""), "");
+    }
+
+    #[test]
+    fn cell_value_for_db_maps_empty_text_to_none() {
+        // 空文本（未匹配的映射列）应映射为 None → 数据库 NULL，
+        // 而非 Some("") → 数据库空字符串
+        use crate::processor::CardRecord;
+        use chrono::TimeZone;
+        use chrono::Utc;
+        let rec = CardRecord {
+            source_name: "s".into(),
+            host_ip: "1.1.1.1".into(),
+            node_name: String::new(),
+            card_id: "0".into(),
+            device_type: "X".into(),
+            namespace: String::new(),
+            pod: String::new(),
+            container: String::new(),
+            core_avg: None,
+            core_peak: None,
+            core_peak_time: None,
+            core_count: None,
+            core_first_time: None,
+            core_last_time: None,
+            mem_avg: None,
+            mem_peak: None,
+            mem_peak_time: None,
+            mem_count: None,
+            mem_first_time: None,
+            mem_last_time: None,
+            temp_avg: None,
+            temp_peak: None,
+            temp_peak_time: None,
+            temp_count: None,
+            temp_first_time: None,
+            temp_last_time: None,
+            power_avg: None,
+            power_peak: None,
+            power_peak_time: None,
+            power_count: None,
+            power_first_time: None,
+            power_last_time: None,
+            host_cpu_avg: None,
+            host_cpu_peak: None,
+            host_cpu_peak_time: None,
+            host_mem_avg: None,
+            host_mem_peak: None,
+            host_mem_peak_time: None,
+            host_handle_avg: None,
+            host_handle_peak: None,
+            host_handle_peak_time: None,
+            range_start: Utc.timestamp_opt(0, 0).unwrap(),
+            range_end: Utc.timestamp_opt(60, 0).unwrap(),
+        };
+        let mapping_borrowed: HashMap<(usize, &str), &str> = HashMap::new();
+        let tz: chrono_tz::Tz = "Asia/Shanghai".parse().unwrap();
+        // 未匹配的映射列 → 空 Text → None (数据库 NULL)
+        assert_eq!(
+            cell_value_for_db(&rec, "不存在的映射列", &mapping_borrowed, 0, tz),
+            None,
+            "未匹配的映射列应返回 None（数据库 NULL）而非空字符串"
+        );
+        // NA 值 → None
+        assert_eq!(
+            cell_value_for_db(&rec, "核心利用率平均值", &mapping_borrowed, 0, tz),
+            None,
+            "N/A 指标值应返回 None（数据库 NULL）"
+        );
+        // 有值文本 → Some
+        assert_eq!(
+            cell_value_for_db(&rec, "主机IP", &mapping_borrowed, 0, tz),
+            Some("1.1.1.1".into()),
+            "有值的文本列应返回 Some"
+        );
     }
 }

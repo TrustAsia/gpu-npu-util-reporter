@@ -39,11 +39,18 @@ pub async fn push_to_database(
         return Ok(());
     }
 
+    // 基础列显示名和本地字段名必须一一对应
+    debug_assert_eq!(
+        base_columns.len(),
+        base_local_names.len(),
+        "base_columns 和 base_local_names 长度不一致"
+    );
+
     // 构建 display_name → local_name 的映射（基础列 + 映射列）
-    // 先收集映射列的 effective_local_name 到 owned Vec，避免 leak
+    // 先收集映射列的 effective_local_name 到 owned Vec，避免 lifetime 问题
     let mapping_local_names_owned: Vec<String> = mapping_columns
         .iter()
-        .map(|c| c.effective_local_name())
+        .map(|c| c.effective_local_name().to_string())
         .collect();
     let display_to_local: HashMap<&str, &str> = base_columns
         .iter()

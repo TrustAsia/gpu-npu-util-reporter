@@ -171,45 +171,64 @@ pub struct ColumnFlags {
 /// 核心列始终出现；可选列组按 flags 决定是否追加。
 #[must_use]
 pub fn build_base_columns(flags: ColumnFlags) -> Vec<String> {
-    let mut cols: Vec<String> = CORE_BASE_COLUMNS.iter().map(|s| (*s).to_string()).collect();
-    if flags.has_temp {
-        cols.extend(TEMP_COLUMNS.iter().map(|s| (*s).to_string()));
-    }
-    if flags.has_power {
-        cols.extend(POWER_COLUMNS.iter().map(|s| (*s).to_string()));
-    }
-    if flags.has_host_cpu {
-        cols.extend(HOST_CPU_COLUMNS.iter().map(|s| (*s).to_string()));
-    }
-    if flags.has_host_mem {
-        cols.extend(HOST_MEM_COLUMNS.iter().map(|s| (*s).to_string()));
-    }
-    if flags.has_host_handle {
-        cols.extend(HOST_HANDLE_COLUMNS.iter().map(|s| (*s).to_string()));
-    }
-    cols
+    build_base_pairs(flags).into_iter().map(|(display, _)| display).collect()
 }
 
 /// 根据配置构建基础列本地字段名有序清单（与 [`build_base_columns`] 一一对应）。
 #[must_use]
 pub fn build_base_local_names(flags: ColumnFlags) -> Vec<String> {
-    let mut names: Vec<String> = CORE_BASE_LOCAL_NAMES.iter().map(|s| (*s).to_string()).collect();
+    build_base_pairs(flags).into_iter().map(|(_, local)| local).collect()
+}
+
+/// 一次性构建 (显示名, 本地字段名) 配对有序清单，避免两个独立函数不同步。
+#[must_use]
+fn build_base_pairs(flags: ColumnFlags) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = CORE_BASE_COLUMNS
+        .iter()
+        .zip(CORE_BASE_LOCAL_NAMES.iter())
+        .map(|(&d, &l)| (d.to_string(), l.to_string()))
+        .collect();
     if flags.has_temp {
-        names.extend(TEMP_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+        pairs.extend(
+            TEMP_COLUMNS
+                .iter()
+                .zip(TEMP_LOCAL_NAMES.iter())
+                .map(|(&d, &l)| (d.to_string(), l.to_string())),
+        );
     }
     if flags.has_power {
-        names.extend(POWER_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+        pairs.extend(
+            POWER_COLUMNS
+                .iter()
+                .zip(POWER_LOCAL_NAMES.iter())
+                .map(|(&d, &l)| (d.to_string(), l.to_string())),
+        );
     }
     if flags.has_host_cpu {
-        names.extend(HOST_CPU_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+        pairs.extend(
+            HOST_CPU_COLUMNS
+                .iter()
+                .zip(HOST_CPU_LOCAL_NAMES.iter())
+                .map(|(&d, &l)| (d.to_string(), l.to_string())),
+        );
     }
     if flags.has_host_mem {
-        names.extend(HOST_MEM_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+        pairs.extend(
+            HOST_MEM_COLUMNS
+                .iter()
+                .zip(HOST_MEM_LOCAL_NAMES.iter())
+                .map(|(&d, &l)| (d.to_string(), l.to_string())),
+        );
     }
     if flags.has_host_handle {
-        names.extend(HOST_HANDLE_LOCAL_NAMES.iter().map(|s| (*s).to_string()));
+        pairs.extend(
+            HOST_HANDLE_COLUMNS
+                .iter()
+                .zip(HOST_HANDLE_LOCAL_NAMES.iter())
+                .map(|(&d, &l)| (d.to_string(), l.to_string())),
+        );
     }
-    names
+    pairs
 }
 
 /// 根据报表显示列名查找对应的本地字段名。
@@ -231,7 +250,7 @@ pub fn local_name_for_column(
     mapping_columns
         .iter()
         .find(|c| c.rename == display_name)
-        .map(|c| c.effective_local_name())
+        .map(|c| c.effective_local_name().to_string())
 }
 
 /// 向后兼容：默认基础列（仅核心列，不含可选指标组）。
@@ -375,8 +394,8 @@ impl MappingConfig {
         let mut dupes = Vec::new();
         for col in self.sources.iter().flat_map(|s| &s.columns) {
             let ln = col.effective_local_name();
-            if !seen.insert(ln.clone()) {
-                dupes.push(ln);
+            if !seen.insert(ln) {
+                dupes.push(ln.to_string());
             }
         }
         dupes.sort();
@@ -386,16 +405,42 @@ impl MappingConfig {
             .map(|r| format!("映射列 local_name「{r}」在多个来源中重复，将导致数据库映射歧义"))
             .collect()
     }
+
+    /// 检测映射列 rename 是否与基础列显示名冲突。
+    /// 冲突会导致 compute_column_order 产出重复列名，造成 Excel/数据库数据错乱。
+    #[must_use]
+    pub fn rename_collides_with_base_warnings(&self) -> Vec<String> {
+        let all_base: std::collections::HashSet<&str> = CORE_BASE_COLUMNS
+            .iter()
+            .chain(TEMP_COLUMNS.iter())
+            .chain(POWER_COLUMNS.iter())
+            .chain(HOST_CPU_COLUMNS.iter())
+            .chain(HOST_MEM_COLUMNS.iter())
+            .chain(HOST_HANDLE_COLUMNS.iter())
+            .copied()
+            .collect();
+        self.sources
+            .iter()
+            .flat_map(|s| &s.columns)
+            .filter(|c| all_base.contains(c.rename.as_str()))
+            .map(|c| {
+                format!(
+                    "映射列 rename「{}」与基础列显示名冲突，将导致数据覆盖",
+                    c.rename
+                )
+            })
+            .collect()
+    }
 }
 
 impl MappingColumn {
     /// 获取有效的本地字段名：显式配置时使用 `local_name`，否则回退到 `source_field`。
+    /// 返回借用以避免不必要的堆分配。
     #[must_use]
-    pub fn effective_local_name(&self) -> String {
+    pub fn effective_local_name(&self) -> &str {
         self.local_name
             .as_deref()
             .unwrap_or(&self.source_field)
-            .to_string()
     }
 }
 

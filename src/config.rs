@@ -1022,6 +1022,14 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     reason: first.clone(),
                 });
             }
+            // 检测映射列 rename 与基础列显示名冲突
+            let collision_warnings = mapping.rename_collides_with_base_warnings();
+            if let Some(first) = collision_warnings.first() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: first.clone(),
+                });
+            }
         }
     }
 
@@ -1082,7 +1090,7 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             // 预构建映射列 local_name 列表（用于 local_name 校验，避免循环内重复构建）
             let mapping_local_names: Vec<String> = cfg.mapping.as_ref()
                 .and_then(|m| if m.enabled { Some(m) } else { None })
-                .map(|m| m.all_columns_owned().iter().map(|c| c.effective_local_name()).collect())
+                .map(|m| m.all_columns_owned().iter().map(|c| c.effective_local_name().to_string()).collect())
                 .unwrap_or_default();
             // 检测映射列 local_name 重复
             if !mapping_local_names.is_empty() {
@@ -1806,5 +1814,29 @@ mod tests {
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_ok(), "自定义 db_type 应通过校验");
+    }
+
+    #[test]
+    fn config_rejects_mapping_rename_colliding_with_base_column() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                source_sheet: None,
+                match_keys: "host_ip".into(),
+                record_key: None,
+                columns: vec![crate::mapper::MappingColumn {
+                    source_field: "custom".into(),
+                    rename: "主机IP".into(), // 与基础列显示名冲突
+                    local_name: None,
+                    position: crate::mapper::InsertPosition::after("节点名称"),
+                }],
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "映射列 rename 与基础列冲突应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("主机IP"), "错误信息应包含冲突的列名");
     }
 }
