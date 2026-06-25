@@ -188,7 +188,9 @@ pub fn hbm_fallback_series(used: &Series, total: &Series) -> Series {
     for (ts, u) in &used.points {
         if let Some(tot) = total_map.get(&ts.timestamp()) {
             if *tot > 0.0 {
-                let v = u / tot * 100.0;
+                // 防御性 clamp：Prometheus used/total 计数器采集时差可能导致
+                // used > total，产出超过 100% 的无效利用率。clamp 到 [0, 100]。
+                let v = (u / tot * 100.0).clamp(0.0, 100.0);
                 // 防御性过滤：除法可能产出 Inf（u 极大 / tot 极小）或 NaN，
                 // 绕过 fetcher 的 parse-time NaN 过滤器，导致 aggregate 结果错误。
                 if v.is_finite() {
@@ -264,8 +266,24 @@ mod tests {
     }
 
     #[test]
-    fn hbm_fallback_drops_inf_result() {
-        // 极大 used / 极小 total → Inf，应被过滤掉。
+    fn hbm_fallback_clamps_over_100() {
+        // used > total（Prometheus 计数器采集时差），产出 >100% 应被 clamp 到 100。
+        let used = Series {
+            labels: HashMap::default(),
+            points: vec![(t(0), 110.0)],
+        };
+        let total = Series {
+            labels: HashMap::default(),
+            points: vec![(t(0), 100.0)],
+        };
+        let fb = hbm_fallback_series(&used, &total);
+        assert_eq!(fb.points.len(), 1);
+        assert!((fb.points[0].1 - 100.0).abs() < 1e-9, "应被 clamp 到 100%");
+    }
+
+    #[test]
+    fn hbm_fallback_clamps_inf_to_100() {
+        // 极大 used / 极小 total → Inf，clamp 后为 100.0（满载）。
         let used = Series {
             labels: HashMap::default(),
             points: vec![(t(0), f64::MAX), (t(60), 50.0)],
@@ -275,8 +293,9 @@ mod tests {
             points: vec![(t(0), f64::MIN_POSITIVE), (t(60), 200.0)],
         };
         let fb = hbm_fallback_series(&used, &total);
-        assert_eq!(fb.points.len(), 1, "Inf 结果应被过滤");
-        assert!((fb.points[0].1 - 25.0).abs() < 1e-9);
+        assert_eq!(fb.points.len(), 2, "Inf 应被 clamp 为 100.0 而非丢弃");
+        assert!((fb.points[0].1 - 100.0).abs() < 1e-9, "Inf → clamp → 100%");
+        assert!((fb.points[1].1 - 25.0).abs() < 1e-9);
     }
 
     #[test]

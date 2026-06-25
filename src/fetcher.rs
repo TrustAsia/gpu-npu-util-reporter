@@ -193,7 +193,12 @@ impl MetricFetcher for PrometheusFetcher {
                     break;
                 }
             }
-            seg_start = seg_end;
+            // 下一分段起点跳过当前段末尾，避免 Prometheus query_range
+            // 包含两端点导致边界时间戳被重复查询。
+            seg_start = seg_end
+                .checked_add_signed(step)
+                .unwrap_or(end)
+                .min(end);
         }
         if partial_failure {
             // 分段查询中途失败：返回 Err 让调用方发出 Warning。
