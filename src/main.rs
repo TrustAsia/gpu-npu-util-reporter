@@ -6,7 +6,7 @@
 
 use gpu_npu_util_reporter::config;
 use gpu_npu_util_reporter::error::AppError;
-use gpu_npu_util_reporter::fetcher::{MetricFetcher, PrometheusFetcher};
+use gpu_npu_util_reporter::fetcher::PrometheusFetcher;
 use gpu_npu_util_reporter::logging;
 use gpu_npu_util_reporter::mapper;
 use gpu_npu_util_reporter::pipeline;
@@ -196,90 +196,11 @@ async fn main() -> ExitCode {
     }
     info!("全部采集完成，共 {} 条记录", records.len());
 
-    // 5.5. 主机指标采集（可选，通用指标）
+    // 5.5. 计算列标志位（主机指标现从设备配方获取）
     let column_flags = mapper::compute_column_flags(
         &cfg.sources,
         &cfg.devices,
-        cfg.host_metrics.as_ref(),
     );
-    if let Some(hm) = &cfg.host_metrics {
-        if hm.enabled {
-            // 确定使用哪个数据源
-            let host_source = if let Some(ref name) = hm.source {
-                cfg.sources.iter().find(|s| &s.name == name)
-            } else {
-                cfg.sources.first()
-            };
-            if let Some(host_src) = host_source {
-                info!("开始采集主机指标（数据源「{}」）", host_src.name);
-                let host_fetcher = PrometheusFetcher::new(
-                    host_src.name.clone(),
-                    host_src.url.clone(),
-                    host_src.timeout_secs,
-                );
-
-                // 收集唯一的主机 IP
-                let host_ips: Vec<String> = records
-                    .iter()
-                    .map(|r| r.host_ip.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-
-                for ip in &host_ips {
-                    if ip.is_empty() {
-                        continue;
-                    }
-                    let ip_regex = pipeline::build_instance_regex(ip);
-                    let label_filter = format!("{}=~\"{}\"", hm.host_label, ip_regex);
-
-                    // 查询 CPU 利用率
-                    let cpu_promql = format!("{}{{{}}}", hm.cpu_metric, label_filter);
-                    let (cpu_avg, cpu_peak, cpu_peak_t) = query_host_metric(
-                        &host_fetcher, &cpu_promql, start, end, step, ip, "CPU",
-                    )
-                    .await;
-
-                    // 查询内存利用率
-                    let mem_promql = format!("{}{{{}}}", hm.mem_metric, label_filter);
-                    let (mem_avg, mem_peak, mem_peak_t) = query_host_metric(
-                        &host_fetcher, &mem_promql, start, end, step, ip, "内存",
-                    )
-                    .await;
-
-                    // 查询句柄数（可选）
-                    let (handle_avg, handle_peak, handle_peak_t) =
-                        if let Some(handle_metric) = &hm.handle_metric {
-                            let h_promql = format!("{handle_metric}{{{}}}", label_filter);
-                            query_host_metric(
-                                &host_fetcher, &h_promql, start, end, step, ip, "句柄数",
-                            )
-                            .await
-                        } else {
-                            (None, None, None)
-                        };
-
-                    // 填入该主机下所有卡记录
-                    for rec in &mut records {
-                        if rec.host_ip == *ip {
-                            rec.host_cpu_avg = cpu_avg;
-                            rec.host_cpu_peak = cpu_peak;
-                            rec.host_cpu_peak_time = cpu_peak_t;
-                            rec.host_mem_avg = mem_avg;
-                            rec.host_mem_peak = mem_peak;
-                            rec.host_mem_peak_time = mem_peak_t;
-                            rec.host_handle_avg = handle_avg;
-                            rec.host_handle_peak = handle_peak;
-                            rec.host_handle_peak_time = handle_peak_t;
-                        }
-                    }
-                }
-                info!("主机指标采集完成（{} 台主机）", host_ips.len());
-            } else {
-                warn!("主机指标已启用但未找到匹配的数据源，跳过主机指标采集");
-            }
-        }
-    }
 
     // 构建动态基础列（含可选指标组）
     let base_columns = mapper::build_base_columns(column_flags);
@@ -423,34 +344,6 @@ async fn main() -> ExitCode {
     }
     info!("运行完成");
     ExitCode::SUCCESS
-}
-
-/// 查询主机指标（CPU/内存/句柄数），合并所有 series 的点后聚合为 (avg, peak, peak_time)。
-async fn query_host_metric(
-    fetcher: &PrometheusFetcher,
-    promql: &str,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    step: Duration,
-    ip: &str,
-    label: &str,
-) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
-    match fetcher.query_range(promql, start, end, step).await {
-        Ok(series) => {
-            let mut all_points: Vec<(DateTime<Utc>, f64)> = Vec::new();
-            for s in &series {
-                pipeline::merge_points_into(&mut all_points, s.points.clone());
-            }
-            gpu_npu_util_reporter::processor::aggregate(&all_points).map_or(
-                (None, None, None),
-                |s| (Some(s.avg), Some(s.peak), Some(s.peak_time)),
-            )
-        }
-        Err(e) => {
-            warn!("主机 {ip} {label} 指标查询失败：{e}");
-            (None, None, None)
-        }
-    }
 }
 
 /// 解析时间字符串（支持绝对时间和相对时间表达式）。

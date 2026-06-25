@@ -14,7 +14,7 @@
 //!   被静默覆写成空 series 而产生"幽灵行"。
 
 use crate::config::AppConfig;
-use crate::devices::{DeviceSpec, MemoryStrategy};
+use crate::devices::{DeviceSpec, HostMetricsSpec, MemoryStrategy};
 use crate::fetcher::MetricFetcher;
 use crate::processor::{self, aggregate, last_non_empty, CardRecord, Series};
 use crate::MAX_FALLBACK_DEPTH;
@@ -211,6 +211,16 @@ pub async fn collect_device(
     let mut keys: Vec<String> = groups.keys().cloned().collect();
     keys.sort();
 
+    // 5. 主机指标采集（可选，设备配方的一部分）。
+    //    从 groups keys 提取唯一主机 IP，对每个 IP 查询 CPU/内存/句柄数，
+    //    结果存入 HashMap 供记录构建时填入。
+    let host_metrics_by_ip: HashMap<String, HostMetricValues> =
+        if let Some(hm) = &ctx.spec.host_metrics {
+            collect_host_metrics(&mut ctx, &groups, hm).await
+        } else {
+            HashMap::new()
+        };
+
     for key in keys {
         let (core, mem) = groups.remove(&key).unwrap_or((None, None));
         // core 与 mem 都为 None 时，仍需保留该行（可能有温度/功率数据），
@@ -258,6 +268,9 @@ pub async fn collect_device(
         )
         .await;
 
+        // 主机指标：按 host_ip 从预采集结果查找
+        let hmv = host_metrics_by_ip.get(&host_ip);
+
         ctx.out.records.push(CardRecord {
             source_name: source_name.into(),
             host_ip,
@@ -291,15 +304,15 @@ pub async fn collect_device(
             power_count: p_count,
             power_first_time: p_first,
             power_last_time: p_last,
-            host_cpu_avg: None,
-            host_cpu_peak: None,
-            host_cpu_peak_time: None,
-            host_mem_avg: None,
-            host_mem_peak: None,
-            host_mem_peak_time: None,
-            host_handle_avg: None,
-            host_handle_peak: None,
-            host_handle_peak_time: None,
+            host_cpu_avg: hmv.and_then(|v| v.cpu_avg),
+            host_cpu_peak: hmv.and_then(|v| v.cpu_peak),
+            host_cpu_peak_time: hmv.and_then(|v| v.cpu_peak_time),
+            host_mem_avg: hmv.and_then(|v| v.mem_avg),
+            host_mem_peak: hmv.and_then(|v| v.mem_peak),
+            host_mem_peak_time: hmv.and_then(|v| v.mem_peak_time),
+            host_handle_avg: hmv.and_then(|v| v.handle_avg),
+            host_handle_peak: hmv.and_then(|v| v.handle_peak),
+            host_handle_peak_time: hmv.and_then(|v| v.handle_peak_time),
             range_start: ctx.start,
             range_end: ctx.end,
         });
@@ -320,6 +333,125 @@ fn merge_into(slot: &mut Option<Series>, incoming: Series) {
             merge_points_into(&mut existing.points, incoming.points);
         }
         None => *slot = Some(incoming),
+    }
+}
+
+/// 单台主机的主机指标聚合结果。
+struct HostMetricValues {
+    cpu_avg: Option<f64>,
+    cpu_peak: Option<f64>,
+    cpu_peak_time: Option<DateTime<Utc>>,
+    mem_avg: Option<f64>,
+    mem_peak: Option<f64>,
+    mem_peak_time: Option<DateTime<Utc>>,
+    handle_avg: Option<f64>,
+    handle_peak: Option<f64>,
+    handle_peak_time: Option<DateTime<Utc>>,
+}
+
+/// 采集该设备类型下所有唯一主机的主机指标。
+///
+/// 从 groups keys（格式 "{ip}|{card_id}"）中提取唯一主机 IP，
+/// 对每个 IP 构造 PromQL 查询 CPU/内存/句柄数，聚合后存入 HashMap。
+async fn collect_host_metrics(
+    ctx: &mut QueryContext<'_>,
+    groups: &HashMap<String, (Option<Series>, Option<Series>)>,
+    hm: &HostMetricsSpec,
+) -> HashMap<String, HostMetricValues> {
+    // 提取唯一主机 IP：从 groups keys 解析，key 格式为 "{ip}|{card_id}"
+    let host_ips: Vec<String> = groups
+        .keys()
+        .filter_map(|k| k.split('|').next())
+        .filter(|ip| !ip.is_empty())
+        .map(String::from)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    if host_ips.is_empty() {
+        return HashMap::new();
+    }
+
+    tracing::info!(
+        "开始采集主机指标（{} 台主机，设备类型「{}」）",
+        host_ips.len(),
+        ctx.spec.display_name
+    );
+
+    let mut result = HashMap::new();
+    for ip in &host_ips {
+        let ip_regex = build_instance_regex(ip);
+        let label_filter = format!("{}=~\"{}\"", hm.host_label, ip_regex);
+
+        // 查询 CPU 利用率
+        let cpu_promql = format!("{}{{{}}}", hm.cpu_metric, label_filter);
+        let (cpu_avg, cpu_peak, cpu_peak_t) =
+            query_host_metric_value(ctx, &cpu_promql, ip, "CPU").await;
+
+        // 查询内存利用率
+        let mem_promql = format!("{}{{{}}}", hm.mem_metric, label_filter);
+        let (mem_avg, mem_peak, mem_peak_t) =
+            query_host_metric_value(ctx, &mem_promql, ip, "内存").await;
+
+        // 查询句柄数（可选）
+        let (handle_avg, handle_peak, handle_peak_t) =
+            if let Some(handle_metric) = &hm.handle_metric {
+                let h_promql = format!("{handle_metric}{{{}}}", label_filter);
+                query_host_metric_value(ctx, &h_promql, ip, "句柄数").await
+            } else {
+                (None, None, None)
+            };
+
+        result.insert(
+            ip.clone(),
+            HostMetricValues {
+                cpu_avg,
+                cpu_peak,
+                cpu_peak_time: cpu_peak_t,
+                mem_avg,
+                mem_peak,
+                mem_peak_time: mem_peak_t,
+                handle_avg,
+                handle_peak,
+                handle_peak_time: handle_peak_t,
+            },
+        );
+    }
+
+    tracing::info!(
+        "主机指标采集完成（{} 台主机，设备类型「{}」）",
+        host_ips.len(),
+        ctx.spec.display_name
+    );
+
+    result
+}
+
+/// 查询单个主机指标，合并所有 series 的点后聚合为 (avg, peak, peak_time)。
+async fn query_host_metric_value(
+    ctx: &mut QueryContext<'_>,
+    promql: &str,
+    ip: &str,
+    label: &str,
+) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
+    match ctx.fetcher.query_range(promql, ctx.start, ctx.end, ctx.step).await {
+        Ok(series) => {
+            let mut all_points: Vec<(DateTime<Utc>, f64)> = Vec::new();
+            for s in &series {
+                merge_points_into(&mut all_points, s.points.clone());
+            }
+            aggregate(&all_points).map_or(
+                (None, None, None),
+                |s| (Some(s.avg), Some(s.peak), Some(s.peak_time)),
+            )
+        }
+        Err(e) => {
+            ctx.out.push_warning(format!(
+                "主机 {ip} {label} 指标查询失败（设备类型「{}」）：{e}",
+                ctx.spec.display_name
+            ));
+            (None, None, None)
+        }
     }
 }
 
@@ -882,6 +1014,7 @@ mod tests {
             },
             temp_metric: None,
             power_metric: None,
+            host_metrics: None,
         };
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -1567,6 +1700,7 @@ mod tests {
             },
             temp_metric: None,
             power_metric: None,
+            host_metrics: None,
         };
         let cfg = cfg_with_mode("instant");
         let out = collect_device(
@@ -1739,5 +1873,121 @@ mod tests {
         // IPv4-mapped IPv6（如 ::ffff:192.168.1.1）不应被误判为 IPv4:port
         // 旧版 host.contains('.') 会触发误剥，导致 IP 被截断
         assert_eq!(strip_port("::ffff:192.168.1.1"), "::ffff:192.168.1.1");
+    }
+
+    // ---- 主机指标采集：设备配方中 host_metrics 配置时正确采集 ----
+
+    #[tokio::test]
+    async fn host_metrics_collected_from_device_spec() {
+        let core = vec![Series {
+            labels: labels(&[
+                ("gpu", "0"),
+                ("host_ip", "1.1.1.1"),
+                ("pod_node", "n1"),
+            ]),
+            points: vec![(t(0), 10.0)],
+        }];
+        // 显存 composite PromQL 含 "ignoring(__name__)"
+        let mem = vec![Series {
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
+            points: vec![(t(0), 20.0)],
+        }];
+        // CPU host metric
+        let cpu_series = vec![Series {
+            labels: labels(&[("instance", "1.1.1.1:9100")]),
+            points: vec![(t(0), 45.0), (t(60), 55.0)],
+        }];
+        // Memory host metric
+        let mem_host_series = vec![Series {
+            labels: labels(&[("instance", "1.1.1.1:9100")]),
+            points: vec![(t(0), 70.0), (t(60), 80.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
+            .when("ignoring(__name__)", Ok(mem))
+            .when("node_cpu_util", Ok(cpu_series))
+            .when("node_mem_util", Ok(mem_host_series));
+        let spec = DeviceSpec {
+            display_name: "NVIDIA A10".into(),
+            core_util_metric: "DCGM_FI_DEV_GPU_UTIL".into(),
+            memory: MemoryStrategy::composite_ratio("DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "host_ip".into(),
+                node_name: "pod_node".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "n".into(),
+            },
+            temp_metric: None,
+            power_metric: None,
+            host_metrics: Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "node_cpu_util".into(),
+                mem_metric: "node_mem_util".into(),
+                handle_metric: None,
+                host_label: "instance".into(),
+            }),
+        };
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert_eq!(out.records.len(), 1);
+        let r = &out.records[0];
+        // CPU: avg=(45+55)/2=50, peak=55
+        assert!((r.host_cpu_avg.unwrap() - 50.0).abs() < 1e-9);
+        assert!((r.host_cpu_peak.unwrap() - 55.0).abs() < 1e-9);
+        // Memory: avg=(70+80)/2=75, peak=80
+        assert!((r.host_mem_avg.unwrap() - 75.0).abs() < 1e-9);
+        assert!((r.host_mem_peak.unwrap() - 80.0).abs() < 1e-9);
+        // 无 handle_metric 配置，句柄数应为 None
+        assert!(r.host_handle_avg.is_none());
+    }
+
+    #[tokio::test]
+    async fn host_metrics_not_collected_when_absent() {
+        let core = vec![Series {
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let fetcher = MockFetcher::new().when("DCGM_FI_DEV_GPU_UTIL", Ok(core));
+        let spec = DeviceSpec {
+            display_name: "T".into(),
+            core_util_metric: "DCGM_FI_DEV_GPU_UTIL".into(),
+            memory: MemoryStrategy::composite_ratio("U", "F"),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "host_ip".into(),
+                node_name: "node".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "n".into(),
+            },
+            temp_metric: None,
+            power_metric: None,
+            host_metrics: None,
+        };
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert_eq!(out.records.len(), 1);
+        let r = &out.records[0];
+        assert!(r.host_cpu_avg.is_none());
+        assert!(r.host_mem_avg.is_none());
     }
 }

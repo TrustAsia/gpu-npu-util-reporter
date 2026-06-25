@@ -166,15 +166,15 @@ pub struct ColumnFlags {
     pub has_host_handle: bool,
 }
 
-/// 根据设备配方和主机指标配置计算列标志位。
+/// 根据设备配方计算列标志位。
 ///
 /// 仅检查被数据源实际引用的设备类型，避免未引用的设备类型
 /// 在报表中产生全 N/A 的额外列。
+/// 主机指标从设备配方的 `host_metrics` 字段获取（而非全局配置）。
 #[must_use]
 pub fn compute_column_flags(
     sources: &[crate::config::SourceConfig],
     devices: &std::collections::HashMap<String, crate::devices::DeviceSpec>,
-    host_metrics: Option<&crate::config::HostMetricsConfig>,
 ) -> ColumnFlags {
     let mut flags = ColumnFlags::default();
     let active_device_keys: std::collections::HashSet<&String> =
@@ -187,13 +187,11 @@ pub fn compute_column_flags(
             if spec.power_metric.is_some() {
                 flags.has_power = true;
             }
-        }
-    }
-    if let Some(hm) = host_metrics {
-        if hm.enabled {
-            flags.has_host_cpu = true;
-            flags.has_host_mem = true;
-            flags.has_host_handle = hm.handle_metric.is_some();
+            if let Some(hm) = &spec.host_metrics {
+                flags.has_host_cpu = true;
+                flags.has_host_mem = true;
+                flags.has_host_handle = hm.handle_metric.is_some();
+            }
         }
     }
     flags

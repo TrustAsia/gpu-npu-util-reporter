@@ -58,7 +58,25 @@ pub struct HostIpConfig {
     pub prefer_label: String,
 }
 
-/// 归属取值模式。
+/// 向后兼容：旧配置文件中的全局 `host_metrics` 块。
+///
+/// 主机指标现已纳入各设备配方的 `host_metrics` 字段，此结构体仅用于
+/// 旧配置反序列化不报错。若检测到此字段，日志输出迁移提示。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LegacyHostMetricsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub cpu_metric: Option<String>,
+    #[serde(default)]
+    pub mem_metric: Option<String>,
+    #[serde(default)]
+    pub handle_metric: Option<String>,
+    #[serde(default)]
+    pub host_label: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OwnershipConfig {
@@ -109,35 +127,6 @@ fn default_file_level() -> String {
 
 fn default_log_path() -> String {
     "./logs/{{now}}.log".into()
-}
-
-/// 主机指标采集配置（通用指标，不绑定设备类型）。
-///
-/// 启用后对每个唯一的主机 IP 查询 CPU/内存/句柄数利用率，
-/// 结果填入该主机下所有计算卡行。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HostMetricsConfig {
-    /// 是否启用主机指标采集。
-    #[serde(default)]
-    pub enabled: bool,
-    /// 指定从哪个数据源查询主机指标（按 name 匹配）；不指定时使用第一个数据源。
-    #[serde(default)]
-    pub source: Option<String>,
-    /// CPU 利用率 Prometheus 指标名。
-    pub cpu_metric: String,
-    /// 内存利用率 Prometheus 指标名。
-    pub mem_metric: String,
-    /// 句柄数 Prometheus 指标名（可选）。
-    #[serde(default)]
-    pub handle_metric: Option<String>,
-    /// Prometheus 标签名，用于匹配主机 IP（默认 "instance"）。
-    #[serde(default = "default_host_label")]
-    pub host_label: String,
-}
-
-fn default_host_label() -> String {
-    "instance".into()
 }
 
 /// 报表输出配置。
@@ -225,9 +214,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub log: LogConfig,
     pub report: ReportConfig,
-    /// 主机指标采集配置（可选）。
+    /// 向后兼容：旧配置文件中的全局 `host_metrics` 块。
+    /// 主机指标现已纳入各设备配方的 `host_metrics` 字段，此字段仅用于
+    /// 旧配置反序列化不报错。若检测到此字段，日志输出迁移提示。
     #[serde(default)]
-    pub host_metrics: Option<HostMetricsConfig>,
+    pub host_metrics: Option<LegacyHostMetricsConfig>,
     /// MySQL 数据库推送配置（可选）。
     #[serde(default)]
     pub database: Option<DatabaseConfig>,
@@ -374,6 +365,30 @@ sources:
 #                    配置后报表自动新增「设备功率平均值/峰值/…」等 6 列。
 #                    例如 NVIDIA 用 "DCGM_FI_DEV_POWER_USAGE"，
 #                    NPU 用 "npu_chip_info_power"。
+#
+# host_metrics     — 主机指标采集配置（可选）。启用后对每台主机查询
+#                    CPU/内存/句柄数利用率，结果填入该主机下所有计算卡行。
+#                    不同设备类型可配置不同的主机指标来源和标签名。
+#                    主机指标使用与设备指标相同的 Prometheus 数据源。
+#
+#   cpu_metric    — CPU 利用率 Prometheus 指标名（值应在 0–100 范围）。
+#   mem_metric    — 内存利用率 Prometheus 指标名（值应在 0–100 范围）。
+#   handle_metric — 句柄数 Prometheus 指标名（可选，不配置则跳过句柄数采集）。
+#   host_label    — Prometheus 标签名，用于匹配主机 IP（默认 "instance"）。
+#                   Prometheus 自动附加的抓取目标标签。如果 exporter 用不同
+#                   标签标识主机（如 "host"、"node"），修改此字段即可。
+#
+# ---- 查询机制 ---------------------------------------------------------------
+# 系统从已采集的卡记录中提取所有唯一主机 IP，对每个 IP 构造 PromQL 查询：
+#   <指标名>{<host_label>=~"^<转义后IP>.*"}
+# 通过 regex 锚定主机 IP 前缀（如 ^192\.168\.1\.100.*），实现主机级聚合。
+#
+# ---- 启用示例（取消注释并填入具体值）----------------------------------------
+# host_metrics:
+#   cpu_metric: "node_cpu_utilization"
+#   mem_metric: "node_memory_utilization"
+#   handle_metric: "node_filefd_allocated"
+#   host_label: "instance"
 #
 # ---- 新增自定义设备类型 ------------------------------------------------------
 # 在 devices 块下新增一个 key（如 my_device），按上方字段填写即可，无需改代码。
@@ -531,39 +546,7 @@ thresholds:
   host_handle_peak_below: null
 
 # =============================================================================
-# 八、主机指标采集 — 以主机为粒度的 CPU/内存/句柄数（可选，通用指标）
-# =============================================================================
-#
-# 与设备指标不同：主机指标不绑定到某一种设备类型，而是按主机 IP 粒度采集，
-# 结果填入该 IP 下所有计算卡行（同一主机的多张卡看到的主机指标值相同）。
-#
-# ---- 查询机制 ---------------------------------------------------------------
-# 系统从已采集的卡记录中提取所有唯一主机 IP，对每个 IP 构造 PromQL 查询：
-#   <指标名>{<host_label>=~"^<转义后IP>.*"}
-# 通过 regex 锚定主机 IP 前缀（如 ^192\.168\.1\.100.*），实现主机级聚合。
-#
-# ---- 字段说明 ---------------------------------------------------------------
-# enabled       — 是否启用。默认 false，设为 true 开启。
-# source        — 从哪个数据源查询主机指标（按 sources 中的 name 匹配）。
-#                 不指定时自动使用第一个数据源。
-# cpu_metric    — CPU 利用率 Prometheus 指标名（值应在 0–100 范围）。
-# mem_metric    — 内存利用率 Prometheus 指标名（值应在 0–100 范围）。
-# handle_metric — 句柄数 Prometheus 指标名（可选，不配置则跳过句柄数采集）。
-# host_label    — Prometheus 标签名，用于匹配主机 IP。
-#                 默认 "instance"（Prometheus 自动附加的抓取目标标签）。
-#                 如果 exporter 用不同标签标识主机（如 "host"、"node"），
-#                 修改此字段即可，无需改代码。
-#
-# host_metrics:
-#   enabled: false
-#   source: "prod-cluster"
-#   cpu_metric: "node_cpu_utilization"
-#   mem_metric: "node_memory_utilization"
-#   handle_metric: "node_filefd_allocated"
-#   host_label: "instance"
-
-# =============================================================================
-# 九、日志配置
+# 八、日志配置
 # =============================================================================
 # console_level — 控制台输出级别：trace / debug / info / warn / error
 #                 建议日常 info，排查问题时可临时改为 debug。
@@ -773,6 +756,16 @@ pub fn load_or_init(path: &str) -> Result<Option<AppConfig>, AppError> {
         reason: format!("{e}"),
     })?;
     validate_config(&cfg, path)?;
+    // 检测旧版全局 host_metrics 配置，输出迁移提示
+    if let Some(ref hm) = cfg.host_metrics {
+        if hm.enabled {
+            tracing::warn!(
+                "检测到旧版全局 host_metrics 配置（已废弃）。\
+                 请将主机指标配置移入 devices 块中各设备类型的 host_metrics 字段。\
+                 全局 host_metrics 将被忽略。"
+            );
+        }
+    }
     Ok(Some(cfg))
 }
 
@@ -935,14 +928,14 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             }
         }
     }
-    // 校验主机指标配置
-    if let Some(hm) = &cfg.host_metrics {
-        if hm.enabled {
+    // 校验设备配方中的主机指标配置
+    for (key, spec) in &cfg.devices {
+        if let Some(hm) = &spec.host_metrics {
             if !is_valid_metric_name(&hm.cpu_metric) {
                 return Err(AppError::Config {
                     path: path.into(),
                     reason: format!(
-                        "host_metrics.cpu_metric「{}」不是合法的 Prometheus 指标名",
+                        "devices.{key}.host_metrics.cpu_metric「{}」不是合法的 Prometheus 指标名",
                         hm.cpu_metric
                     ),
                 });
@@ -951,7 +944,7 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 return Err(AppError::Config {
                     path: path.into(),
                     reason: format!(
-                        "host_metrics.mem_metric「{}」不是合法的 Prometheus 指标名",
+                        "devices.{key}.host_metrics.mem_metric「{}」不是合法的 Prometheus 指标名",
                         hm.mem_metric
                     ),
                 });
@@ -961,7 +954,7 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     return Err(AppError::Config {
                         path: path.into(),
                         reason: format!(
-                            "host_metrics.handle_metric「{handle}」不是合法的 Prometheus 指标名"
+                            "devices.{key}.host_metrics.handle_metric「{handle}」不是合法的 Prometheus 指标名"
                         ),
                     });
                 }
@@ -970,19 +963,10 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 return Err(AppError::Config {
                     path: path.into(),
                     reason: format!(
-                        "host_metrics.host_label「{}」不是合法的 Prometheus 标签名",
+                        "devices.{key}.host_metrics.host_label「{}」不是合法的 Prometheus 标签名",
                         hm.host_label
                     ),
                 });
-            }
-            // 校验 source 引用的数据源存在
-            if let Some(ref src_name) = hm.source {
-                if !cfg.sources.iter().any(|s| &s.name == src_name) {
-                    return Err(AppError::Config {
-                        path: path.into(),
-                        reason: format!("host_metrics.source「{src_name}」引用了未定义的数据源"),
-                    });
-                }
             }
         }
     }
@@ -1026,7 +1010,6 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
             let flags = crate::mapper::compute_column_flags(
                 &cfg.sources,
                 &cfg.devices,
-                cfg.host_metrics.as_ref(),
             );
             let collision_warnings = mapping.rename_collides_with_base_warnings(flags);
             if let Some(first) = collision_warnings.first() {
@@ -1560,6 +1543,59 @@ mod tests {
         // 默认配置的指标名/标签名都应通过校验
         let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         assert!(validate_config(&cfg, "test.yaml").is_ok());
+    }
+
+    #[test]
+    fn config_rejects_invalid_host_metrics_cpu_metric_in_device() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
+            Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "invalid{metric}".into(),
+                mem_metric: "valid_metric".into(),
+                handle_metric: None,
+                host_label: "instance".into(),
+            });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法 cpu_metric 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("host_metrics.cpu_metric"), "错误信息应提及 host_metrics.cpu_metric");
+    }
+
+    #[test]
+    fn config_rejects_invalid_host_metrics_host_label_in_device() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
+            Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "node_cpu".into(),
+                mem_metric: "node_mem".into(),
+                handle_metric: None,
+                host_label: "invalid:label".into(),
+            });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法 host_label 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("host_metrics.host_label"), "错误信息应提及 host_metrics.host_label");
+    }
+
+    #[test]
+    fn config_accepts_valid_host_metrics_in_device() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
+            Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "node_cpu_utilization".into(),
+                mem_metric: "node_memory_utilization".into(),
+                handle_metric: Some("node_filefd_allocated".into()),
+                host_label: "instance".into(),
+            });
+        assert!(validate_config(&cfg, "test.yaml").is_ok(), "合法的 host_metrics 应通过校验");
+    }
+
+    #[test]
+    fn config_tolerates_legacy_global_host_metrics() {
+        // 旧配置文件含全局 host_metrics 键时，不应因 deny_unknown_fields 报错
+        let yaml = default_config_yaml() + "\nhost_metrics:\n  enabled: false\n";
+        let cfg: Result<AppConfig, _> = serde_yaml_ng::from_str(&yaml);
+        assert!(cfg.is_ok(), "旧版全局 host_metrics 不应导致解析失败");
     }
 
     #[test]

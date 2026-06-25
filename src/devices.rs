@@ -3,6 +3,9 @@
 //! 把 PRD §2.2 中 NVIDIA A10 与 Ascend 910B 的指标抽取规则抽象成数据
 //! （[`DeviceSpec`]），让 fetcher/processor 据此决定查什么、怎么算，
 //! 而不是把设备特定逻辑写死在代码分支里。新增设备类型只需新增一份配方。
+//!
+//! 主机指标（CPU/内存/句柄数）也作为配方的一部分（[`HostMetricsSpec`]），
+//! 每种设备类型可独立声明自己的主机指标来源和标签名。
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +27,30 @@ pub struct LabelMapping {
     pub pod: String,
     /// Namespace 标签名。
     pub namespace: String,
+}
+
+/// 主机指标采集配置（设备配方的一部分）。
+///
+/// 每种设备类型可独立声明自己的主机指标来源。启用后对每台主机查询
+/// CPU/内存/句柄数利用率，结果填入该主机下所有计算卡行。
+/// 主机指标使用与设备指标相同的 Prometheus 数据源。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostMetricsSpec {
+    /// CPU 利用率 Prometheus 指标名（值应在 0–100 范围）。
+    pub cpu_metric: String,
+    /// 内存利用率 Prometheus 指标名（值应在 0–100 范围）。
+    pub mem_metric: String,
+    /// 句柄数 Prometheus 指标名（可选，不配置则跳过句柄数采集）。
+    #[serde(default)]
+    pub handle_metric: Option<String>,
+    /// Prometheus 标签名，用于匹配主机 IP（默认 "instance"）。
+    #[serde(default = "default_host_label")]
+    pub host_label: String,
+}
+
+fn default_host_label() -> String {
+    "instance".into()
 }
 
 /// 显存占用率的计算策略。
@@ -174,6 +201,10 @@ pub struct DeviceSpec {
     /// 设备功率指标名（可选，如 `DCGM_FI_DEV_POWER_USAGE`）。
     #[serde(default)]
     pub power_metric: Option<String>,
+    /// 主机指标采集配置（可选）。启用后对每台主机查询 CPU/内存/句柄数，
+    /// 结果填入该主机下所有计算卡行。不同设备类型可配置不同的主机指标。
+    #[serde(default)]
+    pub host_metrics: Option<HostMetricsSpec>,
 }
 
 /// NVIDIA A10 预设配方（基于 DCGM Exporter）。
@@ -193,6 +224,7 @@ pub fn nvidia_a10_spec() -> DeviceSpec {
         },
         temp_metric: Some("DCGM_FI_DEV_GPU_TEMP".into()),
         power_metric: Some("DCGM_FI_DEV_POWER_USAGE".into()),
+        host_metrics: None,
     }
 }
 
@@ -222,6 +254,7 @@ pub fn ascend_910b_spec() -> DeviceSpec {
         },
         temp_metric: Some("npu_chip_info_temperature".into()),
         power_metric: Some("npu_chip_info_power".into()),
+        host_metrics: None,
     }
 }
 
@@ -263,6 +296,35 @@ mod tests {
         let yaml = serde_yaml_ng::to_string(&s).unwrap();
         let back: DeviceSpec = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn host_metrics_spec_round_trips_through_yaml() {
+        let s = HostMetricsSpec {
+            cpu_metric: "node_cpu_utilization".into(),
+            mem_metric: "node_memory_utilization".into(),
+            handle_metric: Some("node_filefd_allocated".into()),
+            host_label: "instance".into(),
+        };
+        let yaml = serde_yaml_ng::to_string(&s).unwrap();
+        let back: HostMetricsSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn device_spec_with_host_metrics_round_trips() {
+        let mut s = nvidia_a10_spec();
+        s.host_metrics = Some(HostMetricsSpec {
+            cpu_metric: "node_cpu_utilization".into(),
+            mem_metric: "node_memory_utilization".into(),
+            handle_metric: None,
+            host_label: "instance".into(),
+        });
+        let yaml = serde_yaml_ng::to_string(&s).unwrap();
+        let back: DeviceSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(s, back);
+        assert!(back.host_metrics.is_some());
+        assert!(back.host_metrics.as_ref().unwrap().handle_metric.is_none());
     }
 
     #[test]
