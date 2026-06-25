@@ -1003,6 +1003,36 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     ),
                     });
                 }
+                // 校验映射列关键字段非空
+                for col in &src.columns {
+                    if col.source_field.is_empty() {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                                "映射来源「{}」的 columns 中 source_field 不能为空字符串",
+                                src.source_path
+                            ),
+                        });
+                    }
+                    if col.rename.is_empty() {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                                "映射来源「{}」的 columns 中 rename 不能为空字符串",
+                                src.source_path
+                            ),
+                        });
+                    }
+                    if col.position.anchor.is_empty() {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                                "映射列「{}」的 position.anchor 不能为空字符串",
+                                col.rename
+                            ),
+                        });
+                    }
+                }
             }
             // 检测映射列 rename 重复
             let dup_warnings = mapping.duplicate_rename_warnings();
@@ -1634,6 +1664,47 @@ mod tests {
         assert!(r.is_err(), "空 display_name 应被拒绝");
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("display_name"), "错误信息应提及 display_name");
+    }
+
+    #[test]
+    fn config_rejects_empty_mapping_column_fields() {
+        use crate::mapper::{Direction, InsertPosition, MappingColumn, MappingConfig, MappingSource};
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(MappingConfig {
+            enabled: true,
+            sources: vec![MappingSource {
+                source_path: "test.csv".into(),
+                source_sheet: None,
+                match_keys: "host_ip".into(),
+                record_key: None,
+                columns: vec![MappingColumn {
+                    source_field: String::new(), // 空
+                    rename: "机房".into(),
+                    local_name: None,
+                    position: InsertPosition {
+                        direction: Direction::After,
+                        anchor: "主机IP".into(),
+                    },
+                }],
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 source_field 应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("source_field"));
+
+        // 空 rename
+        cfg.mapping.as_mut().unwrap().sources[0].columns[0].source_field = "room".into();
+        cfg.mapping.as_mut().unwrap().sources[0].columns[0].rename = String::new();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 rename 应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("rename"));
+
+        // 空 anchor
+        cfg.mapping.as_mut().unwrap().sources[0].columns[0].rename = "机房".into();
+        cfg.mapping.as_mut().unwrap().sources[0].columns[0].position.anchor = String::new();
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "空 anchor 应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("anchor"));
     }
 
     #[test]

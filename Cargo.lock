@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "gpu-npu-util-reporter"
-version = "1.8.4"
+version = "1.8.5"
 dependencies = [
  "async-trait",
  "calamine",
