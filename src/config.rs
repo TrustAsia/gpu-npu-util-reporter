@@ -1156,6 +1156,27 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                             ),
                         });
                     }
+                    // 检查括号外逗号：DECIMAL(10,2) 合法，但 INT, injected 不合法。
+                    // 简单方法：剥除所有括号内内容后检查是否仍有逗号。
+                    let mut depth = 0u32;
+                    let mut has_outer_comma = false;
+                    for ch in db_type.chars() {
+                        match ch {
+                            '(' => depth = depth.saturating_add(1),
+                            ')' => depth = depth.saturating_sub(1),
+                            ',' if depth == 0 => has_outer_comma = true,
+                            _ => {}
+                        }
+                    }
+                    if has_outer_comma {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                                "database.columns 中 local_name「{}」的 db_type「{}」含括号外逗号（可被用于 DDL 注入）",
+                                col.local_name, db_type
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -1945,5 +1966,51 @@ mod tests {
         assert!(r.is_err(), "db_type 含反引号应被拒绝");
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("db_type"), "错误信息应提及 db_type");
+    }
+
+    #[test]
+    fn database_config_rejects_outer_comma_in_db_type() {
+        // 括号外逗号可用于 DDL 注入：INT, injected VARCHAR(255)
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "time_range".into(),
+                db_name: "time_range".into(),
+                db_type: Some("INT, injected VARCHAR(255)".into()),
+                comment: "时间范围".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "db_type 含括号外逗号应被拒绝");
+    }
+
+    #[test]
+    fn database_config_allows_inner_comma_in_db_type() {
+        // DECIMAL(10,2) 等括号内逗号应被允许
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "core_avg".into(),
+                db_name: "core_avg".into(),
+                db_type: Some("DECIMAL(10,2)".into()),
+                comment: "核心利用率".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_ok(), "db_type 含括号内逗号应被允许");
     }
 }
