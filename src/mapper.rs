@@ -810,6 +810,29 @@ mod tests {
         assert_eq!(cols.len(), names.len(), "build_base_columns 与 build_base_local_names 长度必须一致");
     }
 
+    #[test]
+    fn paired_arrays_are_positionally_aligned() {
+        // 校验每对并行数组在 build_base_pairs 中 zip 后产出一致的 (display, local) 对。
+        // 防止元素位置错位（长度相同但内容对不上）导致数据库列映射写错字段。
+        let check = |display: &[&str], local: &[&str], label: &str| {
+            for (i, (d, l)) in display.iter().zip(local.iter()).enumerate() {
+                // 校验 local_name 是合法的 snake_case 标识符（纯小写+下划线+数字），
+                // display_name 不应匹配此模式（它是中文显示名）——若位置错位，
+                // 会出现中文跑到 local_name 或英文跑到 display_name 的情况。
+                assert!(
+                    l.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()),
+                    "{label}[{i}]：local_name「{l}」不像合法的字段标识符，可能位置与 display_name「{d}」错位"
+                );
+            }
+        };
+        check(CORE_BASE_COLUMNS, CORE_BASE_LOCAL_NAMES, "CORE_BASE");
+        check(TEMP_COLUMNS, TEMP_LOCAL_NAMES, "TEMP");
+        check(POWER_COLUMNS, POWER_LOCAL_NAMES, "POWER");
+        check(HOST_CPU_COLUMNS, HOST_CPU_LOCAL_NAMES, "HOST_CPU");
+        check(HOST_MEM_COLUMNS, HOST_MEM_LOCAL_NAMES, "HOST_MEM");
+        check(HOST_HANDLE_COLUMNS, HOST_HANDLE_LOCAL_NAMES, "HOST_HANDLE");
+    }
+
     fn rec(ip: &str, card: &str) -> CardRecord {
         CardRecord {
             source_name: "s".into(),

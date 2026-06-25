@@ -327,7 +327,7 @@ fn merge_into(slot: &mut Option<Series>, incoming: Series) {
 ///
 /// 供 `merge_into`（pipeline 层按 join key 合并）和
 /// `merge_series`（fetcher 层按 label 合并）复用。
-pub(crate) fn merge_points_into(
+pub fn merge_points_into(
     existing: &mut Vec<(chrono::DateTime<chrono::Utc>, f64)>,
     incoming: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
 ) {
@@ -553,17 +553,7 @@ async fn query_with_ip_fallback(
             // 避免 IP 前缀误匹配（如 "1.1" 不应匹配 "1.1.1.1:9090"）。
             // 对 IP 做完整 Prometheus 正则转义（RE2 语法），防御性处理
             // 含特殊字符的标签值。IPv6 方括号需单独处理。
-            let ip_regex_escaped = escape_promql_regex(host_ip);
-            let ip_regex = if host_ip.contains(':') {
-                // IPv6：instance 为 [ip]:port 或 [ip]，正则需匹配字面方括号。
-                // Go 字符串字面量中 \\\\ 解析为 \\，RE2 将 \\[ 视为字面 [。
-                // Rust "\\\\[" = 3字符 "\\["，嵌入 PromQL 后 Go 解析为 "\["，RE2 匹配字面 [。
-                // ($|:) 匹配行尾或冒号（有/无端口均可）。
-                format!("^\\\\[{ip_regex_escaped}\\\\]($|:)")
-            } else {
-                // IPv4：精确匹配 IP 后跟行尾或冒号（有/无端口均可）。
-                format!("^{ip_regex_escaped}($|:)")
-            };
+            let ip_regex = build_instance_regex(host_ip);
             let instance_promql = format!(
                 "{metric}{{{a}=\"{v}\",instance=~\"{ip_re}\"}}",
                 a = ctx.spec.card_id_label,
@@ -794,6 +784,31 @@ fn escape_promql_label_value(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// 构建 instance 标签的正则匹配模式，用于精确匹配主机 IP。
+///
+/// Prometheus `instance` 标签值格式：
+/// - IPv4：`ip:port` 或裸 `ip`
+/// - IPv6：`[ip]:port` 或 `[ip]`（方括号是 Prometheus 惯例，RFC 3986）
+///
+/// 对于 IPv6，生成同时匹配带方括号和不带方括号两种格式的正则，
+/// 兼容默认 `instance` 标签（总是带方括号）和自定义标签（可能不带方括号）。
+///
+/// 输出为 Go 双引号字符串字面量中的正则表达式（RE2 语法），
+/// 适配 Prometheus PromQL `=~"..."` 的 Go 解析规则。
+#[must_use]
+pub fn build_instance_regex(ip: &str) -> String {
+    let escaped = escape_promql_regex(ip);
+    if ip.contains(':') {
+        // IPv6：同时匹配 [ip]:port / [ip] 和裸 ip:port / ip，
+        // 兼容 instance 标签（总带方括号）和自定义 host_label（可能不带）。
+        // RE2 中 \[ / \] 匹配字面方括号；Go 字符串 \\\\[ → \\[ → RE2 \[。
+        format!("^(\\\\[{escaped}\\\\]($|:)|{escaped}($|:))")
+    } else {
+        // IPv4：精确匹配 IP 后跟行尾或冒号（有/无端口均可）。
+        format!("^{escaped}($|:)")
+    }
 }
 
 #[cfg(test)]
@@ -1650,5 +1665,26 @@ mod tests {
         // 嵌入 PromQL 后应为 instance=~"^\\[2001:db8::1\\]:"
         // Go 解析 \\[ → \[, \\] → \]，RE2 看到 ^\[2001:db8::1\]: 匹配字面方括号
         assert_eq!(ip_regex, r"^\\[2001:db8::1\\]:");
+    }
+
+    #[test]
+    fn build_instance_regex_ipv4() {
+        let regex = build_instance_regex("192.168.1.1");
+        // IPv4：精确匹配 IP 后跟行尾或冒号
+        assert_eq!(regex, r"^192\\.168\\.1\\.1($|:)");
+    }
+
+    #[test]
+    fn build_instance_regex_ipv6_matches_both_bare_and_bracketed() {
+        let regex = build_instance_regex("2001:db8::1");
+        // IPv6：应同时匹配带方括号和不带方括号的格式
+        // 带方括号部分：^\\[2001:db8::1\\]($|:)
+        // 裸 IPv6 部分：^2001:db8::1($|:) — 注意 : 不需要转义（RE2 字面量）
+        assert!(regex.contains(r"\\["), "应含方括号转义 \\[");
+        assert!(regex.contains(r"\\]"), "应含方括号转义 \\]");
+        assert!(regex.contains("2001:db8::1"), "应含 IP 字面量");
+        // 两种选择用 | 组合，外层 ^... 包裹
+        assert!(regex.starts_with("^("), "应以 ^( 开头");
+        assert!(regex.ends_with(")"), "应以 ) 结尾");
     }
 }
