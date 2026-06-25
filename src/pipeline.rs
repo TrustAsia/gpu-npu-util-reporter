@@ -1990,4 +1990,132 @@ mod tests {
         assert!(r.host_cpu_avg.is_none());
         assert!(r.host_mem_avg.is_none());
     }
+
+    #[tokio::test]
+    async fn host_metrics_with_handle_metric_collected() {
+        let core = vec![Series {
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let mem = vec![Series {
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
+            points: vec![(t(0), 20.0)],
+        }];
+        let cpu_series = vec![Series {
+            labels: labels(&[("instance", "1.1.1.1:9100")]),
+            points: vec![(t(0), 50.0)],
+        }];
+        let mem_host_series = vec![Series {
+            labels: labels(&[("instance", "1.1.1.1:9100")]),
+            points: vec![(t(0), 60.0)],
+        }];
+        let handle_series = vec![Series {
+            labels: labels(&[("instance", "1.1.1.1:9100")]),
+            points: vec![(t(0), 1000.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
+            .when("ignoring(__name__)", Ok(mem))
+            .when("node_cpu_util", Ok(cpu_series))
+            .when("node_mem_util", Ok(mem_host_series))
+            .when("node_filefd", Ok(handle_series));
+        let spec = DeviceSpec {
+            display_name: "NVIDIA A10".into(),
+            core_util_metric: "DCGM_FI_DEV_GPU_UTIL".into(),
+            memory: MemoryStrategy::composite_ratio("DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_FB_FREE"),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "host_ip".into(),
+                node_name: "pod_node".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "n".into(),
+            },
+            temp_metric: None,
+            power_metric: None,
+            host_metrics: Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "node_cpu_util".into(),
+                mem_metric: "node_mem_util".into(),
+                handle_metric: Some("node_filefd".into()),
+                host_label: "instance".into(),
+            }),
+        };
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert_eq!(out.records.len(), 1);
+        let r = &out.records[0];
+        assert!(r.host_cpu_avg.is_some());
+        assert!(r.host_mem_avg.is_some());
+        assert!((r.host_handle_avg.unwrap() - 1000.0).abs() < 1e-9);
+        assert!((r.host_handle_peak.unwrap() - 1000.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn host_metrics_query_failure_produces_warning() {
+        let core = vec![Series {
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
+            points: vec![(t(0), 10.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
+            .when("node_cpu_util", Err(AppError::Prometheus {
+                source_name: "s".into(),
+                url: "http://x".into(),
+                detail: "连接失败".into(),
+            }))
+            .when("node_mem_util", Ok(vec![]));
+        let spec = DeviceSpec {
+            display_name: "T".into(),
+            core_util_metric: "DCGM_FI_DEV_GPU_UTIL".into(),
+            memory: MemoryStrategy::composite_ratio("U", "F"),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "host_ip".into(),
+                node_name: "node".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "n".into(),
+            },
+            temp_metric: None,
+            power_metric: None,
+            host_metrics: Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "node_cpu_util".into(),
+                mem_metric: "node_mem_util".into(),
+                handle_metric: None,
+                host_label: "instance".into(),
+            }),
+        };
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert_eq!(out.records.len(), 1);
+        let r = &out.records[0];
+        // CPU 查询失败应降级为 N/A
+        assert!(r.host_cpu_avg.is_none());
+        // 内存查询返回空也应为 N/A
+        assert!(r.host_mem_avg.is_none());
+        // 应产生 Warning
+        assert!(
+            out.warnings.iter().any(|w| w.contains("CPU") && w.contains("查询失败")),
+            "CPU 查询失败应产生 Warning，实际：{:?}",
+            out.warnings
+        );
+    }
 }
