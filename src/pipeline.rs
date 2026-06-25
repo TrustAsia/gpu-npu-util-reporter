@@ -428,6 +428,10 @@ async fn collect_host_metrics(
 }
 
 /// 查询单个主机指标，合并所有 series 的点后聚合为 (avg, peak, peak_time)。
+///
+/// 注意：主机指标可能返回多条 series（如 per-core CPU），此时同一时间戳
+/// 会有多个值。我们按时间戳分组取均值后再聚合，避免 `merge_points_into`
+/// 的去重逻辑丢弃同一时间戳的多个观测值。
 async fn query_host_metric_value(
     ctx: &mut QueryContext<'_>,
     promql: &str,
@@ -436,11 +440,32 @@ async fn query_host_metric_value(
 ) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
     match ctx.fetcher.query_range(promql, ctx.start, ctx.end, ctx.step).await {
         Ok(series) => {
+            // 收集所有 series 的点（不去重），按时间戳分组取均值
             let mut all_points: Vec<(DateTime<Utc>, f64)> = Vec::new();
             for s in &series {
-                merge_points_into(&mut all_points, s.points.clone());
+                all_points.extend_from_slice(&s.points);
             }
-            aggregate(&all_points).map_or(
+            if all_points.is_empty() {
+                return (None, None, None);
+            }
+            // 按时间戳排序，同时间戳的点相邻
+            all_points.sort_by_key(|(ts, _)| *ts);
+            // 按时间戳分组取均值：同一时间戳的多条 series（如 per-core）
+            // 取均值后再聚合，避免去重丢弃数据导致均值偏高。
+            let mut averaged: Vec<(DateTime<Utc>, f64)> = Vec::new();
+            let mut i = 0;
+            while i < all_points.len() {
+                let ts = all_points[i].0;
+                let mut sum = 0.0_f64;
+                let mut count = 0usize;
+                while i < all_points.len() && all_points[i].0 == ts {
+                    sum += all_points[i].1;
+                    count += 1;
+                    i += 1;
+                }
+                averaged.push((ts, sum / count as f64));
+            }
+            aggregate(&averaged).map_or(
                 (None, None, None),
                 |s| (Some(s.avg), Some(s.peak), Some(s.peak_time)),
             )
@@ -455,10 +480,12 @@ async fn query_host_metric_value(
     }
 }
 
-/// 将 incoming 的点合并进 existing，按时间戳排序并去重（同一时间戳保留最后值）。
+/// 将 incoming 的点合并进 existing，按时间戳排序并去重（同一时间戳保留最大值）。
 ///
 /// 供 `merge_into`（pipeline 层按 join key 合并）和
 /// `merge_series`（fetcher 层按 label 合并）复用。
+/// 注意：主机指标的多 series 合并不应使用此函数（会丢弃同时间戳的多观测值），
+/// 应使用 `query_host_metric_value` 中的按时间戳分组取均值逻辑。
 pub fn merge_points_into(
     existing: &mut Vec<(chrono::DateTime<chrono::Utc>, f64)>,
     incoming: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
@@ -466,8 +493,8 @@ pub fn merge_points_into(
     existing.extend(incoming);
     // 按时间戳稳定排序，等时间戳时按值作二级排序以保证确定性去重。
     existing.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    // 同一时间戳保留最后一个值（最新观测），丢弃更早的点。
-    // dedup_by 保留首个元素，因此先反转，去重后再反转回来。
+    // 同一时间戳保留最大值（排序后同时间戳按值升序，反转后最大值在前，
+    // dedup_by 保留首个元素即最大值）。
     existing.reverse();
     existing.dedup_by(|a, b| a.0 == b.0);
     existing.reverse();
@@ -2123,6 +2150,80 @@ mod tests {
             out.warnings.iter().any(|w| w.contains("CPU") && w.contains("查询失败")),
             "CPU 查询失败应产生 Warning，实际：{:?}",
             out.warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn host_metrics_averages_multi_series_per_timestamp() {
+        // 主机指标返回多条 series（如 per-core CPU），同一时间戳有多个值。
+        // 应按时间戳分组取均值后再聚合，而非去重丢弃。
+        let core = vec![Series {
+            labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
+            points: vec![(t(0), 10.0), (t(60), 20.0)],
+        }];
+        // 两条 CPU series：core0=80%, core1=20% at t0; core0=60%, core1=40% at t60
+        let cpu_series = vec![
+            Series {
+                labels: labels(&[("cpu", "0"), ("instance", "1.1.1.1:9100")]),
+                points: vec![(t(0), 80.0), (t(60), 60.0)],
+            },
+            Series {
+                labels: labels(&[("cpu", "1"), ("instance", "1.1.1.1:9100")]),
+                points: vec![(t(0), 20.0), (t(60), 40.0)],
+            },
+        ];
+        let mem_series = vec![Series {
+            labels: labels(&[("instance", "1.1.1.1:9100")]),
+            points: vec![(t(0), 50.0), (t(60), 50.0)],
+        }];
+        let fetcher = MockFetcher::new()
+            .when("DCGM_FI_DEV_GPU_UTIL", Ok(core))
+            .when("node_cpu_util", Ok(cpu_series))
+            .when("node_mem_util", Ok(mem_series));
+        let spec = DeviceSpec {
+            display_name: "T".into(),
+            core_util_metric: "DCGM_FI_DEV_GPU_UTIL".into(),
+            memory: MemoryStrategy::composite_ratio("U", "F"),
+            card_id_label: "gpu".into(),
+            labels: crate::devices::LabelMapping {
+                host_ip: "host_ip".into(),
+                node_name: "node".into(),
+                container: "c".into(),
+                pod: "p".into(),
+                namespace: "n".into(),
+            },
+            temp_metric: None,
+            power_metric: None,
+            host_metrics: Some(crate::devices::HostMetricsSpec {
+                cpu_metric: "node_cpu_util".into(),
+                mem_metric: "node_mem_util".into(),
+                handle_metric: None,
+                host_label: "instance".into(),
+            }),
+        };
+        let cfg = cfg_with_mode("instant");
+        let out = collect_device(
+            &fetcher,
+            "s",
+            &spec,
+            t(0),
+            t(60),
+            Duration::seconds(60),
+            &cfg,
+        )
+        .await;
+        assert_eq!(out.records.len(), 1);
+        let r = &out.records[0];
+        // CPU: t0 avg=(80+20)/2=50, t60 avg=(60+40)/2=50 → overall avg=50, peak=50
+        assert!(
+            (r.host_cpu_avg.unwrap() - 50.0).abs() < 1e-9,
+            "多 series 应按时间戳取均值，实际：{:?}",
+            r.host_cpu_avg
+        );
+        assert!(
+            (r.host_cpu_peak.unwrap() - 50.0).abs() < 1e-9,
+            "多 series 峰值应为时间戳均值中的最大值，实际：{:?}",
+            r.host_cpu_peak
         );
     }
 }
