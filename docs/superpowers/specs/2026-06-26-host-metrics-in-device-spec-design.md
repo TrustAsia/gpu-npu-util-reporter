@@ -61,11 +61,17 @@ pub struct DeviceSpec {
 
 变更后：
 - 主机指标采集在 `collect_device` 内完成，与设备指标同流程
-- 当 `spec.host_metrics` 为 `Some` 时，从已采集的卡记录中提取该设备类型的唯一主机 IP，
-  对每个 IP 构造 PromQL 查询
+- **采集时机**：在 `groups` HashMap 构建完成后、`for key in keys` 记录构建循环之前，
+  从 `groups.keys()` 提取唯一主机 IP，查询主机指标，存入
+  `HashMap<String, HostMetricValues>`，在记录构建时填入
 - 主机 IP 匹配标签从 `spec.labels.host_ip` 获取（复用已有的 IP 提取逻辑）
-- `source` 字段不再需要（主机指标使用与设备指标相同的 Prometheus 数据源）
+- **同源查询**：主机指标使用与设备指标相同的 Prometheus 数据源（同一 fetcher），
+  不再需要 `source` 字段。这是合理的：设备配方及其主机指标都从定义了
+  `device_types` 的同一源查询
 - `CardRecord` 的主机指标字段不变
+- **注意**：同一主机若同时有 NVIDIA 和 NPU 卡，主机指标会被查询两次
+  （每个设备类型各一次）。若两者配置相同，结果一致；若配置不同，
+  各设备类型的卡行将显示各自配置对应的主机指标值
 
 ### 5. `mapper.rs` 列标志位计算
 
