@@ -394,16 +394,42 @@ async fn collect_host_metrics(
         hm.handle_expr.as_deref().unwrap_or("未配置"),
     );
 
+    // 提取每台主机的 node_name，用于 IP 匹配失败时的回退。
+    // 从 groups 的 series 标签中提取，key 格式为 "{ip}|{card_id}"。
+    let mut node_name_by_ip: HashMap<String, String> = HashMap::new();
+    for (key, slot) in groups {
+        let ip = key.split('|').next().unwrap_or("");
+        if ip.is_empty() {
+            continue;
+        }
+        let series = slot.0.as_ref().or(slot.1.as_ref());
+        if let Some(s) = series {
+            if let Some(nn) = s.labels.get(&ctx.spec.labels.node_name) {
+                if !nn.is_empty() {
+                    node_name_by_ip.insert(ip.to_string(), nn.clone());
+                }
+            }
+        }
+    }
+
     let mut result = HashMap::new();
     for ip in &host_ips {
         let ip_regex = build_instance_regex(ip);
         let label_filter = format!("{}=~\"{}\"", hm.host_label, ip_regex);
 
+        // 构建 node_name 回退的 label_filter（如有 node_name）
+        let nn_label_filter = node_name_by_ip.get(ip).map(|nn| {
+            let nn_escaped = escape_promql_regex(nn);
+            format!("{}=~\"{}.*\"", hm.host_label, nn_escaped)
+        });
+
         // 查询 CPU 利用率（可选）
         let (cpu_avg, cpu_peak, cpu_peak_t) =
             if let Some(cpu_expr) = &hm.cpu_expr {
-                let cpu_promql = append_label_filter(cpu_expr, &label_filter);
-                query_host_metric_value(ctx, &cpu_promql, ip, "CPU利用率").await
+                query_host_metric_with_fallback(
+                    ctx, cpu_expr, &label_filter, nn_label_filter.as_deref(), ip, "CPU利用率",
+                )
+                .await
             } else {
                 tracing::debug!(
                     "主机 {ip} 跳过 CPU 指标采集：设备类型「{}」未配置 cpu_expr",
@@ -415,8 +441,10 @@ async fn collect_host_metrics(
         // 查询内存利用率（可选）
         let (mem_avg, mem_peak, mem_peak_t) =
             if let Some(mem_expr) = &hm.mem_expr {
-                let mem_promql = append_label_filter(mem_expr, &label_filter);
-                query_host_metric_value(ctx, &mem_promql, ip, "内存利用率").await
+                query_host_metric_with_fallback(
+                    ctx, mem_expr, &label_filter, nn_label_filter.as_deref(), ip, "内存利用率",
+                )
+                .await
             } else {
                 tracing::debug!(
                     "主机 {ip} 跳过内存指标采集：设备类型「{}」未配置 mem_expr",
@@ -428,9 +456,10 @@ async fn collect_host_metrics(
         // 查询句柄数（可选）
         let (handle_avg, handle_peak, handle_peak_t) =
             if let Some(handle_expr) = &hm.handle_expr {
-                let h_promql = append_label_filter(handle_expr, &label_filter);
-                let (avg, peak, peak_t) =
-                    query_host_metric_value(ctx, &h_promql, ip, "句柄数").await;
+                let (avg, peak, peak_t) = query_host_metric_with_fallback(
+                    ctx, handle_expr, &label_filter, nn_label_filter.as_deref(), ip, "句柄数",
+                )
+                .await;
                 // 句柄数为整数，平均数舍弃小数部分
                 (avg.map(|v| v.trunc()), peak, peak_t)
             } else {
@@ -743,6 +772,33 @@ fn is_simple_metric_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+}
+
+/// 查询单个主机指标，先尝试主 label_filter，若返回空则回退用 nn_label_filter。
+///
+/// 典型场景：IP 匹配 instance 返回空（node_exporter 的 instance 标签可能使用
+/// 主机名而非 IP），回退用 node_name 匹配 instance。
+async fn query_host_metric_with_fallback(
+    ctx: &mut QueryContext<'_>,
+    expr: &str,
+    label_filter: &str,
+    nn_label_filter: Option<&str>,
+    ip: &str,
+    label: &str,
+) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
+    let promql = append_label_filter(expr, label_filter);
+    let result = query_host_metric_value(ctx, &promql, ip, label).await;
+    if result.0.is_none() {
+        if let Some(nn_filter) = nn_label_filter {
+            tracing::info!(
+                "主机 {ip} {label} IP 匹配无数据，回退用 node_name 匹配（设备类型「{}」）",
+                ctx.spec.display_name,
+            );
+            let nn_promql = append_label_filter(expr, nn_filter);
+            return query_host_metric_value(ctx, &nn_promql, ip, &format!("{label}(node_name回退)")).await;
+        }
+    }
+    result
 }
 
 /// 查询单个主机指标，合并所有 series 的点后聚合为 (avg, peak, peak_time)。
