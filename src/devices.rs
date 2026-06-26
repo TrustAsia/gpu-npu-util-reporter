@@ -34,19 +34,37 @@ pub struct LabelMapping {
 /// 每种设备类型可独立声明自己的主机指标来源。启用后对每台主机查询
 /// CPU/内存/句柄数利用率，结果填入该主机下所有计算卡行。
 /// 主机指标使用与设备指标相同的 Prometheus 数据源。
+///
+/// 各指标字段支持完整的 PromQL 表达式（如
+/// `100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)`），
+/// 也支持简单的指标名（如 `node_cpu_utilization`）。
+/// 未配置的指标项将被跳过（报表显示 N/A）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostMetricsSpec {
-    /// CPU 利用率 Prometheus 指标名（值应在 0–100 范围）。
-    pub cpu_metric: String,
-    /// 内存利用率 Prometheus 指标名（值应在 0–100 范围）。
-    pub mem_metric: String,
-    /// 句柄数 Prometheus 指标名（可选，不配置则跳过句柄数采集）。
+    /// 是否启用主机指标采集（默认 true）。
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// CPU 利用率 PromQL 表达式（可选，值应在 0–100 范围）。
+    /// 支持完整 PromQL 表达式，如：
+    ///   `100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)`
+    /// 也支持简单指标名，如 `node_cpu_utilization`。
     #[serde(default)]
-    pub handle_metric: Option<String>,
+    pub cpu_expr: Option<String>,
+    /// 内存利用率 PromQL 表达式（可选，值应在 0–100 范围）。
+    /// 如：`100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)`
+    #[serde(default)]
+    pub mem_expr: Option<String>,
+    /// 句柄数 PromQL 表达式（可选，如 `node_filefd_allocated`）。
+    #[serde(default)]
+    pub handle_expr: Option<String>,
     /// Prometheus 标签名，用于匹配主机 IP（默认 "instance"）。
     #[serde(default = "default_host_label")]
     pub host_label: String,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 fn default_host_label() -> String {
@@ -224,7 +242,18 @@ pub fn nvidia_a10_spec() -> DeviceSpec {
         },
         temp_metric: Some("DCGM_FI_DEV_GPU_TEMP".into()),
         power_metric: Some("DCGM_FI_DEV_POWER_USAGE".into()),
-        host_metrics: None,
+        host_metrics: Some(HostMetricsSpec {
+            enabled: true,
+            cpu_expr: Some(
+                "100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)"
+                    .into(),
+            ),
+            mem_expr: Some(
+                "100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)".into(),
+            ),
+            handle_expr: Some("node_filefd_allocated".into()),
+            host_label: "instance".into(),
+        }),
     }
 }
 
@@ -254,7 +283,18 @@ pub fn ascend_910b_spec() -> DeviceSpec {
         },
         temp_metric: Some("npu_chip_info_temperature".into()),
         power_metric: Some("npu_chip_info_power".into()),
-        host_metrics: None,
+        host_metrics: Some(HostMetricsSpec {
+            enabled: true,
+            cpu_expr: Some(
+                "100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)"
+                    .into(),
+            ),
+            mem_expr: Some(
+                "100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)".into(),
+            ),
+            handle_expr: Some("node_filefd_allocated".into()),
+            host_label: "instance".into(),
+        }),
     }
 }
 
@@ -301,9 +341,10 @@ mod tests {
     #[test]
     fn host_metrics_spec_round_trips_through_yaml() {
         let s = HostMetricsSpec {
-            cpu_metric: "node_cpu_utilization".into(),
-            mem_metric: "node_memory_utilization".into(),
-            handle_metric: Some("node_filefd_allocated".into()),
+            enabled: true,
+            cpu_expr: Some("100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)".into()),
+            mem_expr: Some("100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)".into()),
+            handle_expr: Some("node_filefd_allocated".into()),
             host_label: "instance".into(),
         };
         let yaml = serde_yaml_ng::to_string(&s).unwrap();
@@ -313,18 +354,32 @@ mod tests {
 
     #[test]
     fn device_spec_with_host_metrics_round_trips() {
-        let mut s = nvidia_a10_spec();
-        s.host_metrics = Some(HostMetricsSpec {
-            cpu_metric: "node_cpu_utilization".into(),
-            mem_metric: "node_memory_utilization".into(),
-            handle_metric: None,
-            host_label: "instance".into(),
-        });
+        let s = nvidia_a10_spec();
         let yaml = serde_yaml_ng::to_string(&s).unwrap();
         let back: DeviceSpec = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(s, back);
         assert!(back.host_metrics.is_some());
-        assert!(back.host_metrics.as_ref().unwrap().handle_metric.is_none());
+        let hm = back.host_metrics.as_ref().unwrap();
+        assert!(hm.enabled);
+        assert!(hm.cpu_expr.is_some());
+        assert!(hm.mem_expr.is_some());
+        assert!(hm.handle_expr.is_some());
+    }
+
+    #[test]
+    fn host_metrics_minimal_round_trips() {
+        // 只配 host_label，其余可选字段为 None
+        let s = HostMetricsSpec {
+            enabled: true,
+            cpu_expr: None,
+            mem_expr: None,
+            handle_expr: None,
+            host_label: "instance".into(),
+        };
+        let yaml = serde_yaml_ng::to_string(&s).unwrap();
+        let back: HostMetricsSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(s, back);
+        assert!(back.cpu_expr.is_none());
     }
 
     #[test]

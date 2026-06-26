@@ -142,7 +142,7 @@ pub const HOST_MEM_LOCAL_NAMES: &[&str] = &[
     "host_mem_peak_time",
 ];
 
-/// 主机句柄数列（启用主机指标且配置了 handle_metric 时出现）。
+/// 主机句柄数列（启用主机指标且配置了 handle_expr 时出现）。
 pub const HOST_HANDLE_COLUMNS: &[&str] = &[
     "主机句柄数平均值",
     "主机句柄数峰值",
@@ -188,9 +188,11 @@ pub fn compute_column_flags(
                 flags.has_power = true;
             }
             if let Some(hm) = &spec.host_metrics {
-                flags.has_host_cpu = true;
-                flags.has_host_mem = true;
-                flags.has_host_handle |= hm.handle_metric.is_some();
+                if hm.enabled {
+                    flags.has_host_cpu |= hm.cpu_expr.is_some();
+                    flags.has_host_mem |= hm.mem_expr.is_some();
+                    flags.has_host_handle |= hm.handle_expr.is_some();
+                }
             }
         }
     }
@@ -1286,7 +1288,7 @@ mod tests {
 
     #[test]
     fn compute_column_flags_host_handle_uses_logical_or() {
-        // 两个设备类型：A 有 handle_metric，B 没有。
+        // 两个设备类型：A 有 handle_expr，B 没有。
         // has_host_handle 应为 true（任一设备有即启用），不应被后者覆盖为 false。
         let sources = vec![crate::config::SourceConfig {
             name: "s".into(),
@@ -1310,9 +1312,10 @@ mod tests {
             temp_metric: None,
             power_metric: None,
             host_metrics: Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "cpu".into(),
-                mem_metric: "mem".into(),
-                handle_metric: Some("handle".into()),
+                enabled: true,
+                cpu_expr: Some("cpu".into()),
+                mem_expr: Some("mem".into()),
+                handle_expr: Some("handle".into()),
                 host_label: "instance".into(),
             }),
         });
@@ -1331,14 +1334,15 @@ mod tests {
             temp_metric: None,
             power_metric: None,
             host_metrics: Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "cpu2".into(),
-                mem_metric: "mem2".into(),
-                handle_metric: None,
+                enabled: true,
+                cpu_expr: Some("cpu2".into()),
+                mem_expr: Some("mem2".into()),
+                handle_expr: None,
                 host_label: "instance".into(),
             }),
         });
         let flags = compute_column_flags(&sources, &devices);
-        assert!(flags.has_host_handle, "has_host_handle 应为 true（dev_a 有 handle_metric），不应被 dev_b 覆盖");
+        assert!(flags.has_host_handle, "has_host_handle 应为 true（dev_a 有 handle_expr），不应被 dev_b 覆盖");
         assert!(flags.has_host_cpu);
         assert!(flags.has_host_mem);
     }

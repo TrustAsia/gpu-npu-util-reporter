@@ -319,10 +319,13 @@ fn cell_value(
             .host_mem_peak_time
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
-        "主机句柄数平均值" => rec.host_handle_avg.map_or(CellValue::Na, CellValue::Number),
+        "主机句柄数平均值" => rec.host_handle_avg.map_or(CellValue::Na, |v| {
+            // 句柄数为整数，舍弃小数部分
+            CellValue::Count(v.trunc() as usize)
+        }),
         "主机句柄数峰值" => rec
             .host_handle_peak
-            .map_or(CellValue::Na, CellValue::Number),
+            .map_or(CellValue::Na, |v| CellValue::Count(v.trunc() as usize)),
         "主机句柄数峰值出现时间" => rec
             .host_handle_peak_time
             .map(ts)

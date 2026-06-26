@@ -71,9 +71,15 @@ pub struct LegacyHostMetricsConfig {
     #[serde(default)]
     pub cpu_metric: Option<String>,
     #[serde(default)]
+    pub cpu_expr: Option<String>,
+    #[serde(default)]
     pub mem_metric: Option<String>,
     #[serde(default)]
+    pub mem_expr: Option<String>,
+    #[serde(default)]
     pub handle_metric: Option<String>,
+    #[serde(default)]
+    pub handle_expr: Option<String>,
     #[serde(default)]
     pub host_label: Option<String>,
 }
@@ -366,29 +372,40 @@ sources:
 #                    例如 NVIDIA 用 "DCGM_FI_DEV_POWER_USAGE"，
 #                    NPU 用 "npu_chip_info_power"。
 #
-# host_metrics     — 主机指标采集配置（可选）。启用后对每台主机查询
-#                    CPU/内存/句柄数利用率，结果填入该主机下所有计算卡行。
-#                    不同设备类型可配置不同的主机指标来源和标签名。
-#                    主机指标使用与设备指标相同的 Prometheus 数据源。
+# host_metrics     — 主机指标采集配置。默认启用，按需配置各指标表达式。
+#                    每个指标项支持完整 PromQL 表达式或简单指标名。
+#                    未配置的指标项将跳过（报表显示 N/A）。
 #
-#   cpu_metric    — CPU 利用率 Prometheus 指标名（值应在 0–100 范围）。
-#   mem_metric    — 内存利用率 Prometheus 指标名（值应在 0–100 范围）。
-#   handle_metric — 句柄数 Prometheus 指标名（可选，不配置则跳过句柄数采集）。
+#   enabled       — 是否启用主机指标采集（默认 true）。设为 false 可关闭。
+#   cpu_expr      — CPU 利用率 PromQL 表达式（可选，值应在 0–100 范围）。
+#                   支持完整表达式，如：
+#                     100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+#                   也支持简单指标名，如 node_cpu_utilization。
+#   mem_expr      — 内存利用率 PromQL 表达式（可选，值应在 0–100 范围）。
+#                   如：100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)
+#   handle_expr   — 句柄数 PromQL 表达式（可选，如 node_filefd_allocated）。
 #   host_label    — Prometheus 标签名，用于匹配主机 IP（默认 "instance"）。
 #                   Prometheus 自动附加的抓取目标标签。如果 exporter 用不同
 #                   标签标识主机（如 "host"、"node"），修改此字段即可。
 #
 # ---- 查询机制 ---------------------------------------------------------------
 # 系统从已采集的卡记录中提取所有唯一主机 IP，对每个 IP 构造 PromQL 查询：
-#   <指标名>{<host_label>=~"^<转义后IP>.*"}
+#   <表达式>{<host_label>=~"^<转义后IP>.*"}
 # 通过 regex 锚定主机 IP 前缀（如 ^192\.168\.1\.100.*），实现主机级聚合。
+# 注意：若表达式本身已含标签选择器（如 node_cpu_seconds_total{mode="idle"}），
+# 系统会自动追加 host_label 过滤，不会覆盖已有标签。
 #
-# ---- 启用示例（取消注释并填入具体值）----------------------------------------
+# ---- 自定义示例 --------------------------------------------------------------
+# 只采集 CPU 和内存，不采集句柄数：
 # host_metrics:
-#   cpu_metric: "node_cpu_utilization"
-#   mem_metric: "node_memory_utilization"
-#   handle_metric: "node_filefd_allocated"
+#   enabled: true
+#   cpu_expr: '100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)'
+#   mem_expr: '100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)'
 #   host_label: "instance"
+#
+# 禁用主机指标采集：
+# host_metrics:
+#   enabled: false
 #
 # ---- 新增自定义设备类型 ------------------------------------------------------
 # 在 devices 块下新增一个 key（如 my_device），按上方字段填写即可，无需改代码。
@@ -965,30 +982,32 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
     // 校验设备配方中的主机指标配置
     for (key, spec) in &cfg.devices {
         if let Some(hm) = &spec.host_metrics {
-            if !is_valid_metric_name(&hm.cpu_metric) {
-                return Err(AppError::Config {
-                    path: path.into(),
-                    reason: format!(
-                        "devices.{key}.host_metrics.cpu_metric「{}」不是合法的 Prometheus 指标名",
-                        hm.cpu_metric
-                    ),
-                });
-            }
-            if !is_valid_metric_name(&hm.mem_metric) {
-                return Err(AppError::Config {
-                    path: path.into(),
-                    reason: format!(
-                        "devices.{key}.host_metrics.mem_metric「{}」不是合法的 Prometheus 指标名",
-                        hm.mem_metric
-                    ),
-                });
-            }
-            if let Some(handle) = &hm.handle_metric {
-                if !is_valid_metric_name(handle) {
+            if let Some(cpu) = &hm.cpu_expr {
+                if !is_valid_promql_expr(cpu) {
                     return Err(AppError::Config {
                         path: path.into(),
                         reason: format!(
-                            "devices.{key}.host_metrics.handle_metric「{handle}」不是合法的 Prometheus 指标名"
+                            "devices.{key}.host_metrics.cpu_expr「{cpu}」不是合法的 PromQL 表达式"
+                        ),
+                    });
+                }
+            }
+            if let Some(mem) = &hm.mem_expr {
+                if !is_valid_promql_expr(mem) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "devices.{key}.host_metrics.mem_expr「{mem}」不是合法的 PromQL 表达式"
+                        ),
+                    });
+                }
+            }
+            if let Some(handle) = &hm.handle_expr {
+                if !is_valid_promql_expr(handle) {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "devices.{key}.host_metrics.handle_expr「{handle}」不是合法的 PromQL 表达式"
                         ),
                     });
                 }
@@ -999,6 +1018,15 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     reason: format!(
                         "devices.{key}.host_metrics.host_label「{}」不是合法的 Prometheus 标签名",
                         hm.host_label
+                    ),
+                });
+            }
+            if hm.enabled && hm.cpu_expr.is_none() && hm.mem_expr.is_none() && hm.handle_expr.is_none() {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "devices.{key}.host_metrics.enabled=true 但未配置任何指标表达式\
+                         （至少需要 cpu_expr / mem_expr / handle_expr 之一）"
                     ),
                 });
             }
@@ -1325,6 +1353,18 @@ fn is_valid_metric_name(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+}
+
+/// PromQL 表达式合法性校验。
+///
+/// 与 [`is_valid_metric_name`] 不同，本函数允许完整的 PromQL 语法：
+/// 括号、运算符、函数调用、标签选择器等。仅拒绝空字符串和明显非法字符。
+fn is_valid_promql_expr(s: &str) -> bool {
+    if s.trim().is_empty() {
+        return false;
+    }
+    // 拒绝控制字符（除空白符外）
+    !s.chars().any(|c| c.is_control() && !c.is_whitespace())
 }
 
 /// Prometheus 标签名合法性：`[a-zA-Z_][a-zA-Z0-9_]*`
@@ -1658,19 +1698,20 @@ mod tests {
     }
 
     #[test]
-    fn config_rejects_invalid_host_metrics_cpu_metric_in_device() {
+    fn config_rejects_invalid_host_metrics_cpu_expr_in_device() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
             Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "invalid{metric}".into(),
-                mem_metric: "valid_metric".into(),
-                handle_metric: None,
+                enabled: true,
+                cpu_expr: Some("invalid\x01expr".into()), // 控制字符
+                mem_expr: Some("valid_metric".into()),
+                handle_expr: None,
                 host_label: "instance".into(),
             });
         let r = validate_config(&cfg, "test.yaml");
-        assert!(r.is_err(), "非法 cpu_metric 应被拒绝");
+        assert!(r.is_err(), "非法 cpu_expr 应被拒绝");
         let msg = format!("{}", r.unwrap_err());
-        assert!(msg.contains("host_metrics.cpu_metric"), "错误信息应提及 host_metrics.cpu_metric");
+        assert!(msg.contains("host_metrics.cpu_expr"), "错误信息应提及 host_metrics.cpu_expr");
     }
 
     #[test]
@@ -1678,9 +1719,10 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
             Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "node_cpu".into(),
-                mem_metric: "node_mem".into(),
-                handle_metric: None,
+                enabled: true,
+                cpu_expr: Some("node_cpu".into()),
+                mem_expr: Some("node_mem".into()),
+                handle_expr: None,
                 host_label: "invalid:label".into(),
             });
         let r = validate_config(&cfg, "test.yaml");
@@ -1694,12 +1736,44 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
             Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "node_cpu_utilization".into(),
-                mem_metric: "node_memory_utilization".into(),
-                handle_metric: Some("node_filefd_allocated".into()),
+                enabled: true,
+                cpu_expr: Some("100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)".into()),
+                mem_expr: Some("100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)".into()),
+                handle_expr: Some("node_filefd_allocated".into()),
                 host_label: "instance".into(),
             });
         assert!(validate_config(&cfg, "test.yaml").is_ok(), "合法的 host_metrics 应通过校验");
+    }
+
+    #[test]
+    fn config_rejects_enabled_host_metrics_with_no_exprs() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
+            Some(crate::devices::HostMetricsSpec {
+                enabled: true,
+                cpu_expr: None,
+                mem_expr: None,
+                handle_expr: None,
+                host_label: "instance".into(),
+            });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "enabled=true 但无任何表达式应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("至少需要"), "错误信息应提示至少需要一个表达式");
+    }
+
+    #[test]
+    fn config_accepts_disabled_host_metrics_with_no_exprs() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.devices.get_mut("nvidia_a10").unwrap().host_metrics =
+            Some(crate::devices::HostMetricsSpec {
+                enabled: false,
+                cpu_expr: None,
+                mem_expr: None,
+                handle_expr: None,
+                host_label: "instance".into(),
+            });
+        assert!(validate_config(&cfg, "test.yaml").is_ok(), "disabled 的 host_metrics 无需表达式");
     }
 
     #[test]
@@ -1771,6 +1845,26 @@ mod tests {
         assert!(!is_valid_metric_name("1starts_with_digit"));
         assert!(!is_valid_metric_name("metric with space"));
         assert!(!is_valid_metric_name("metric{evil}"));
+    }
+
+    #[test]
+    fn is_valid_promql_expr_accepts_expressions() {
+        // 简单指标名
+        assert!(is_valid_promql_expr("node_cpu_utilization"));
+        // 完整 PromQL 表达式
+        assert!(is_valid_promql_expr(
+            r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#
+        ));
+        assert!(is_valid_promql_expr(
+            r#"100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)"#
+        ));
+        // 带标签的指标
+        assert!(is_valid_promql_expr(r#"node_filefd_allocated{job="node"}"#));
+        // 拒绝空
+        assert!(!is_valid_promql_expr(""));
+        assert!(!is_valid_promql_expr("   "));
+        // 拒绝控制字符
+        assert!(!is_valid_promql_expr("metric\x01name"));
     }
 
     #[test]

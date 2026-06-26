@@ -216,7 +216,15 @@ pub async fn collect_device(
     //    结果存入 HashMap 供记录构建时填入。
     let host_metrics_by_ip: HashMap<String, HostMetricValues> =
         if let Some(hm) = &ctx.spec.host_metrics {
-            collect_host_metrics(&mut ctx, &groups, hm).await
+            if hm.enabled {
+                collect_host_metrics(&mut ctx, &groups, hm).await
+            } else {
+                tracing::info!(
+                    "主机指标采集已禁用（设备类型「{}」host_metrics.enabled=false）",
+                    ctx.spec.display_name
+                );
+                HashMap::new()
+            }
         } else {
             HashMap::new()
         };
@@ -353,11 +361,16 @@ struct HostMetricValues {
 ///
 /// 从 groups keys（格式 "{ip}|{card_id}"）中提取唯一主机 IP，
 /// 对每个 IP 构造 PromQL 查询 CPU/内存/句柄数，聚合后存入 HashMap。
+/// 跳过未配置的表达式（报表显示 N/A）。
 async fn collect_host_metrics(
     ctx: &mut QueryContext<'_>,
     groups: &HashMap<String, (Option<Series>, Option<Series>)>,
     hm: &HostMetricsSpec,
 ) -> HashMap<String, HostMetricValues> {
+    if !hm.enabled {
+        return HashMap::new();
+    }
+
     // 提取唯一主机 IP：从 groups keys 解析，key 格式为 "{ip}|{card_id}"
     let host_ips: Vec<String> = groups
         .keys()
@@ -373,9 +386,12 @@ async fn collect_host_metrics(
     }
 
     tracing::info!(
-        "开始采集主机指标（{} 台主机，设备类型「{}」）",
+        "开始采集主机指标（{} 台主机，设备类型「{}」，CPU={}，内存={}，句柄={}",
         host_ips.len(),
-        ctx.spec.display_name
+        ctx.spec.display_name,
+        hm.cpu_expr.as_deref().unwrap_or("未配置"),
+        hm.mem_expr.as_deref().unwrap_or("未配置"),
+        hm.handle_expr.as_deref().unwrap_or("未配置"),
     );
 
     let mut result = HashMap::new();
@@ -383,22 +399,45 @@ async fn collect_host_metrics(
         let ip_regex = build_instance_regex(ip);
         let label_filter = format!("{}=~\"{}\"", hm.host_label, ip_regex);
 
-        // 查询 CPU 利用率
-        let cpu_promql = format!("{}{{{}}}", hm.cpu_metric, label_filter);
+        // 查询 CPU 利用率（可选）
         let (cpu_avg, cpu_peak, cpu_peak_t) =
-            query_host_metric_value(ctx, &cpu_promql, ip, "CPU").await;
+            if let Some(cpu_expr) = &hm.cpu_expr {
+                let cpu_promql = append_label_filter(cpu_expr, &label_filter);
+                query_host_metric_value(ctx, &cpu_promql, ip, "CPU利用率").await
+            } else {
+                tracing::debug!(
+                    "主机 {ip} 跳过 CPU 指标采集：设备类型「{}」未配置 cpu_expr",
+                    ctx.spec.display_name
+                );
+                (None, None, None)
+            };
 
-        // 查询内存利用率
-        let mem_promql = format!("{}{{{}}}", hm.mem_metric, label_filter);
+        // 查询内存利用率（可选）
         let (mem_avg, mem_peak, mem_peak_t) =
-            query_host_metric_value(ctx, &mem_promql, ip, "内存").await;
+            if let Some(mem_expr) = &hm.mem_expr {
+                let mem_promql = append_label_filter(mem_expr, &label_filter);
+                query_host_metric_value(ctx, &mem_promql, ip, "内存利用率").await
+            } else {
+                tracing::debug!(
+                    "主机 {ip} 跳过内存指标采集：设备类型「{}」未配置 mem_expr",
+                    ctx.spec.display_name
+                );
+                (None, None, None)
+            };
 
         // 查询句柄数（可选）
         let (handle_avg, handle_peak, handle_peak_t) =
-            if let Some(handle_metric) = &hm.handle_metric {
-                let h_promql = format!("{handle_metric}{{{}}}", label_filter);
-                query_host_metric_value(ctx, &h_promql, ip, "句柄数").await
+            if let Some(handle_expr) = &hm.handle_expr {
+                let h_promql = append_label_filter(handle_expr, &label_filter);
+                let (avg, peak, peak_t) =
+                    query_host_metric_value(ctx, &h_promql, ip, "句柄数").await;
+                // 句柄数为整数，平均数舍弃小数部分
+                (avg.map(|v| v.trunc()), peak, peak_t)
             } else {
+                tracing::debug!(
+                    "主机 {ip} 跳过句柄数指标采集：设备类型「{}」未配置 handle_expr",
+                    ctx.spec.display_name
+                );
                 (None, None, None)
             };
 
@@ -427,6 +466,50 @@ async fn collect_host_metrics(
     result
 }
 
+/// 将 `label_filter`（如 `instance=~"^192\.168\.1\.100.*"`）追加到 PromQL 表达式中。
+///
+/// - 若表达式以 `}` 结尾（已有标签选择器如 `metric{mode="idle"}`），
+///   则在闭合 `}` 前插入 `, label_filter`，变成 `metric{mode="idle", instance=~"..."}`。
+/// - 若表达式无标签选择器（如 `metric` 或 `func(metric)`），
+///   则在表达式最外层追加 `{label_filter}`，变成 `metric{instance=~"..."}`。
+fn append_label_filter(expr: &str, label_filter: &str) -> String {
+    let trimmed = expr.trim();
+    // 查找最后一个 }，且它前面有匹配的 {
+    if let Some(last_brace) = trimmed.rfind('}') {
+        // 找到与这个 } 对应的 {——往前搜索
+        let mut depth = 0i32;
+        let mut open_pos = None;
+        for (i, ch) in trimmed[..last_brace].char_indices().rev() {
+            match ch {
+                '}' => depth += 1,
+                '{' => {
+                    if depth == 0 {
+                        open_pos = Some(i);
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        if let Some(open) = open_pos {
+            let between = trimmed[open + 1..last_brace].trim();
+            if between.is_empty() {
+                // 空标签选择器如 metric{} → metric{label_filter}
+                return format!("{}{{{}}}", &trimmed[..open], label_filter);
+            }
+            // 非空标签选择器 → 在 } 前追加
+            return format!(
+                "{}, {}}}",
+                &trimmed[..last_brace],
+                label_filter
+            );
+        }
+    }
+    // 无标签选择器——在表达式最外层包裹
+    format!("{}{{{}}}", trimmed, label_filter)
+}
+
 /// 查询单个主机指标，合并所有 series 的点后聚合为 (avg, peak, peak_time)。
 ///
 /// 注意：主机指标可能返回多条 series（如 per-core CPU），此时同一时间戳
@@ -447,6 +530,11 @@ async fn query_host_metric_value(
                 all_points.extend(s.points.iter().copied().filter(|(_, v)| v.is_finite()));
             }
             if all_points.is_empty() {
+                tracing::warn!(
+                    "主机 {ip} {label} 指标无有效数据点（设备类型「{}」，查询返回 {} 条 series 但无有限值），PromQL: {promql}",
+                    ctx.spec.display_name,
+                    series.len(),
+                );
                 return (None, None, None);
             }
             // 按时间戳排序，同时间戳的点相邻
@@ -473,8 +561,8 @@ async fn query_host_metric_value(
         }
         Err(e) => {
             ctx.out.push_warning(format!(
-                "主机 {ip} {label} 指标查询失败（设备类型「{}」）：{e}",
-                ctx.spec.display_name
+                "主机 {ip} {label} 指标查询失败（设备类型「{}」）：{e}，PromQL: {promql}",
+                ctx.spec.display_name,
             ));
             (None, None, None)
         }
@@ -1964,9 +2052,10 @@ mod tests {
             temp_metric: None,
             power_metric: None,
             host_metrics: Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "node_cpu_util".into(),
-                mem_metric: "node_mem_util".into(),
-                handle_metric: None,
+                enabled: true,
+                cpu_expr: Some("node_cpu_util".into()),
+                mem_expr: Some("node_mem_util".into()),
+                handle_expr: None,
                 host_label: "instance".into(),
             }),
         };
@@ -1989,7 +2078,7 @@ mod tests {
         // Memory: avg=(70+80)/2=75, peak=80
         assert!((r.host_mem_avg.unwrap() - 75.0).abs() < 1e-9);
         assert!((r.host_mem_peak.unwrap() - 80.0).abs() < 1e-9);
-        // 无 handle_metric 配置，句柄数应为 None
+        // 无 handle_expr 配置，句柄数应为 None
         assert!(r.host_handle_avg.is_none());
     }
 
@@ -2034,7 +2123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_metrics_with_handle_metric_collected() {
+    async fn host_metrics_with_handle_expr_collected() {
         let core = vec![Series {
             labels: labels(&[("gpu", "0"), ("host_ip", "1.1.1.1")]),
             points: vec![(t(0), 10.0)],
@@ -2076,9 +2165,10 @@ mod tests {
             temp_metric: None,
             power_metric: None,
             host_metrics: Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "node_cpu_util".into(),
-                mem_metric: "node_mem_util".into(),
-                handle_metric: Some("node_filefd".into()),
+                enabled: true,
+                cpu_expr: Some("node_cpu_util".into()),
+                mem_expr: Some("node_mem_util".into()),
+                handle_expr: Some("node_filefd".into()),
                 host_label: "instance".into(),
             }),
         };
@@ -2097,6 +2187,7 @@ mod tests {
         let r = &out.records[0];
         assert!(r.host_cpu_avg.is_some());
         assert!(r.host_mem_avg.is_some());
+        // 句柄数平均值应为整数（trunc）
         assert!((r.host_handle_avg.unwrap() - 1000.0).abs() < 1e-9);
         assert!((r.host_handle_peak.unwrap() - 1000.0).abs() < 1e-9);
     }
@@ -2130,9 +2221,10 @@ mod tests {
             temp_metric: None,
             power_metric: None,
             host_metrics: Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "node_cpu_util".into(),
-                mem_metric: "node_mem_util".into(),
-                handle_metric: None,
+                enabled: true,
+                cpu_expr: Some("node_cpu_util".into()),
+                mem_expr: Some("node_mem_util".into()),
+                handle_expr: None,
                 host_label: "instance".into(),
             }),
         };
@@ -2155,7 +2247,7 @@ mod tests {
         assert!(r.host_mem_avg.is_none());
         // 应产生 Warning
         assert!(
-            out.warnings.iter().any(|w| w.contains("CPU") && w.contains("查询失败")),
+            out.warnings.iter().any(|w| w.contains("CPU利用率") && w.contains("查询失败")),
             "CPU 查询失败应产生 Warning，实际：{:?}",
             out.warnings
         );
@@ -2203,9 +2295,10 @@ mod tests {
             temp_metric: None,
             power_metric: None,
             host_metrics: Some(crate::devices::HostMetricsSpec {
-                cpu_metric: "node_cpu_util".into(),
-                mem_metric: "node_mem_util".into(),
-                handle_metric: None,
+                enabled: true,
+                cpu_expr: Some("node_cpu_util".into()),
+                mem_expr: Some("node_mem_util".into()),
+                handle_expr: None,
                 host_label: "instance".into(),
             }),
         };
@@ -2233,5 +2326,52 @@ mod tests {
             "多 series 峰值应为时间戳均值中的最大值，实际：{:?}",
             r.host_cpu_peak
         );
+    }
+
+    #[test]
+    fn append_label_filter_simple_metric() {
+        let result = append_label_filter("node_cpu_util", r#"instance=~"^1\.2\.3\.4.*""#);
+        assert_eq!(result, r#"node_cpu_util{instance=~"^1\.2\.3\.4.*"}"#);
+    }
+
+    #[test]
+    fn append_label_filter_metric_with_existing_labels() {
+        let result = append_label_filter(
+            r#"node_cpu_seconds_total{mode="idle"}"#,
+            r#"instance=~"^1\.2\.3\.4.*""#,
+        );
+        assert_eq!(
+            result,
+            r#"node_cpu_seconds_total{mode="idle", instance=~"^1\.2\.3\.4.*"}"#
+        );
+    }
+
+    #[test]
+    fn append_label_filter_metric_with_empty_braces() {
+        let result = append_label_filter(
+            "node_cpu_seconds_total{}",
+            r#"instance=~"^1\.2\.3\.4.*""#,
+        );
+        assert_eq!(
+            result,
+            r#"node_cpu_seconds_total{instance=~"^1\.2\.3\.4.*"}"#
+        );
+    }
+
+    #[test]
+    fn append_label_filter_complex_expression() {
+        let result = append_label_filter(
+            r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#,
+            r#"instance=~"^1\.2\.3\.4.*""#,
+        );
+        // 复杂表达式，最后一个 } 对应 {mode="idle"}，应在 mode="idle" 后追加
+        assert!(result.contains(r#"mode="idle", instance=~"^1\.2\.3\.4.*""#));
+    }
+
+    #[test]
+    fn handle_avg_truncated_to_integer() {
+        // 验证句柄数平均值舍弃小数部分
+        let val: f64 = 1234.5678;
+        assert_eq!(val.trunc(), 1234.0);
     }
 }
