@@ -359,9 +359,14 @@ struct HostMetricValues {
 
 /// 采集该设备类型下所有唯一主机的主机指标。
 ///
-/// 从 groups keys（格式 "{ip}|{card_id}"）中提取唯一主机 IP，
-/// 对每个 IP 构造 PromQL 查询 CPU/内存/句柄数，聚合后存入 HashMap。
-/// 跳过未配置的表达式（报表显示 N/A）。
+/// 策略：对每个指标（CPU/内存/句柄数）发**一次**不带 instance 过滤的 PromQL 查询，
+/// 获取所有主机的数据，然后按 `host_label`（默认 `instance`）标签值与设备指标中
+/// 的 IP/主机名做内存匹配。
+///
+/// 这比逐 IP 发带正则过滤的查询更可靠：
+/// - 避免了 PromQL 正则中 `\\.` 在 URL 传输中的编码问题
+/// - 避免了 IP 前缀误匹配（如 `172.22.129.1` 匹配 `172.22.129.10`）
+/// - 减少了 HTTP 请求次数（N 个指标 × 1 次 vs N 个指标 × M 台主机）
 async fn collect_host_metrics(
     ctx: &mut QueryContext<'_>,
     groups: &HashMap<String, (Option<Series>, Option<Series>)>,
@@ -394,7 +399,7 @@ async fn collect_host_metrics(
         hm.handle_expr.as_deref().unwrap_or("未配置"),
     );
 
-    // 提取每台主机的 node_name，用于 IP 匹配失败时的回退。
+    // 提取每台主机的 node_name，用于 instance 标签值匹配。
     // 从 groups 的 series 标签中提取，key 格式为 "{ip}|{card_id}"。
     let mut node_name_by_ip: HashMap<String, String> = HashMap::new();
     for (key, slot) in groups {
@@ -412,63 +417,54 @@ async fn collect_host_metrics(
         }
     }
 
+    // 对每个指标发一次不带 instance 过滤的查询，获取所有主机数据
+    // CPU 利用率
+    let cpu_series = if let Some(cpu_expr) = &hm.cpu_expr {
+        fetch_with_warning(ctx, cpu_expr).await
+    } else {
+        Vec::new()
+    };
+
+    // 内存利用率
+    let mem_series = if let Some(mem_expr) = &hm.mem_expr {
+        fetch_with_warning(ctx, mem_expr).await
+    } else {
+        Vec::new()
+    };
+
+    // 句柄数
+    let handle_series = if let Some(handle_expr) = &hm.handle_expr {
+        fetch_with_warning(ctx, handle_expr).await
+    } else {
+        Vec::new()
+    };
+
+    // 按 host_label 值（instance）将 series 分组到各主机 IP
+    // 匹配策略：从 host_label 值中提取 IP，与 host_ips 匹配
     let mut result = HashMap::new();
     for ip in &host_ips {
-        let ip_regex = build_instance_regex(ip);
-        let label_filter = format!("{}=~\"{}\"", hm.host_label, ip_regex);
+        let node_name = node_name_by_ip.get(ip).map(|s| s.as_str()).unwrap_or("");
 
-        // 构建 node_name 回退的 label_filter（如有 node_name）
-        let nn_label_filter = node_name_by_ip.get(ip).map(|nn| {
-            let nn_escaped = escape_promql_regex(nn);
-            format!("{}=~\"{}.*\"", hm.host_label, nn_escaped)
-        });
-
-        // 查询 CPU 利用率（可选）
+        // 从全量 CPU 数据中筛选属于该主机的 series
+        let cpu_filtered: Vec<Series> = filter_series_by_host(
+            &cpu_series, &hm.host_label, ip, node_name,
+        );
         let (cpu_avg, cpu_peak, cpu_peak_t) =
-            if let Some(cpu_expr) = &hm.cpu_expr {
-                query_host_metric_with_fallback(
-                    ctx, cpu_expr, &label_filter, nn_label_filter.as_deref(), ip, "CPU利用率",
-                )
-                .await
-            } else {
-                tracing::debug!(
-                    "主机 {ip} 跳过 CPU 指标采集：设备类型「{}」未配置 cpu_expr",
-                    ctx.spec.display_name
-                );
-                (None, None, None)
-            };
+            aggregate_host_metric_series(&cpu_filtered, ip, "CPU利用率", ctx.spec.display_name.as_str());
 
-        // 查询内存利用率（可选）
+        let mem_filtered: Vec<Series> = filter_series_by_host(
+            &mem_series, &hm.host_label, ip, node_name,
+        );
         let (mem_avg, mem_peak, mem_peak_t) =
-            if let Some(mem_expr) = &hm.mem_expr {
-                query_host_metric_with_fallback(
-                    ctx, mem_expr, &label_filter, nn_label_filter.as_deref(), ip, "内存利用率",
-                )
-                .await
-            } else {
-                tracing::debug!(
-                    "主机 {ip} 跳过内存指标采集：设备类型「{}」未配置 mem_expr",
-                    ctx.spec.display_name
-                );
-                (None, None, None)
-            };
+            aggregate_host_metric_series(&mem_filtered, ip, "内存利用率", ctx.spec.display_name.as_str());
 
-        // 查询句柄数（可选）
+        let handle_filtered: Vec<Series> = filter_series_by_host(
+            &handle_series, &hm.host_label, ip, node_name,
+        );
         let (handle_avg, handle_peak, handle_peak_t) =
-            if let Some(handle_expr) = &hm.handle_expr {
-                let (avg, peak, peak_t) = query_host_metric_with_fallback(
-                    ctx, handle_expr, &label_filter, nn_label_filter.as_deref(), ip, "句柄数",
-                )
-                .await;
-                // 句柄数为整数，平均数舍弃小数部分
-                (avg.map(|v| v.trunc()), peak, peak_t)
-            } else {
-                tracing::debug!(
-                    "主机 {ip} 跳过句柄数指标采集：设备类型「{}」未配置 handle_expr",
-                    ctx.spec.display_name
-                );
-                (None, None, None)
-            };
+            aggregate_host_metric_series(&handle_filtered, ip, "句柄数", ctx.spec.display_name.as_str());
+        // 句柄数为整数，平均数舍弃小数部分
+        let handle_avg = handle_avg.map(|v| v.trunc());
 
         result.insert(
             ip.clone(),
@@ -493,6 +489,77 @@ async fn collect_host_metrics(
     );
 
     result
+}
+
+/// 从全量 series 中筛选属于指定主机的 series。
+///
+/// 匹配策略：取 series 的 `host_label` 标签值，从中剥离端口号后
+/// 与 `ip` 比较；若不匹配，再用 `node_name` 前缀匹配。
+fn filter_series_by_host(
+    all_series: &[Series],
+    host_label: &str,
+    ip: &str,
+    node_name: &str,
+) -> Vec<Series> {
+    all_series
+        .iter()
+        .filter(|s| {
+            let label_val = match s.labels.get(host_label) {
+                Some(v) => v,
+                None => return false,
+            };
+            // 策略1：从 label 值中剥离端口号，与 IP 比较
+            let stripped = strip_port(label_val);
+            if stripped == ip {
+                return true;
+            }
+            // 策略2：用 node_name 前缀匹配（instance 可能是 "hostname:port"）
+            if !node_name.is_empty() && label_val.starts_with(node_name) {
+                return true;
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+/// 对筛选后的主机指标 series 做聚合，返回 (avg, peak, peak_time)。
+fn aggregate_host_metric_series(
+    series: &[Series],
+    ip: &str,
+    label: &str,
+    display_name: &str,
+) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
+    // 收集所有 series 的点（不去重），按时间戳分组取均值
+    let mut all_points: Vec<(DateTime<Utc>, f64)> = Vec::new();
+    for s in series {
+        all_points.extend(s.points.iter().copied().filter(|(_, v)| v.is_finite()));
+    }
+    if all_points.is_empty() {
+        tracing::warn!(
+            "主机 {ip} {label} 指标无有效数据点（设备类型「{display_name}」）"
+        );
+        return (None, None, None);
+    }
+    all_points.sort_by_key(|(ts, _)| *ts);
+    // 按时间戳分组取均值
+    let mut averaged: Vec<(DateTime<Utc>, f64)> = Vec::new();
+    let mut i = 0;
+    while i < all_points.len() {
+        let ts = all_points[i].0;
+        let mut sum = 0.0_f64;
+        let mut count = 0usize;
+        while i < all_points.len() && all_points[i].0 == ts {
+            sum += all_points[i].1;
+            count += 1;
+            i += 1;
+        }
+        averaged.push((ts, sum / count as f64));
+    }
+    aggregate(&averaged).map_or(
+        (None, None, None),
+        |s| (Some(s.avg), Some(s.peak), Some(s.peak_time)),
+    )
 }
 
 /// 将 `label_filter`（如 `instance=~"^192\.168\.1\.100.*"`）追加到 PromQL 表达式中。
@@ -520,6 +587,7 @@ async fn collect_host_metrics(
 /// 格式可能不同（含/不含端口），导致匹配不上而返回空结果。
 /// 在向量选择器内部注入标签过滤器是更可靠的做法——它直接在数据源层面过滤，
 /// 不依赖任何辅助指标，也不存在标签值不匹配的问题。
+#[allow(dead_code)] // 保留供归属查询和未来使用
 fn append_label_filter(expr: &str, label_filter: &str) -> String {
     let trimmed = expr.trim();
 
@@ -573,18 +641,7 @@ fn append_label_filter(expr: &str, label_filter: &str) -> String {
 }
 
 /// 在 PromQL 表达式内部的每个向量选择器中注入标签过滤器。
-///
-/// 遍历表达式，找到所有**向量选择器**（指标名后跟 `{` 或裸指标名后跟 `[` 或
-/// 表达式末尾/运算符），将 `label_filter` 注入到花括号内（如有）或追加花括号。
-///
-/// 关键区分规则：
-/// - 指标名后跟 `{` → 带标签的向量选择器（注入到花括号内）
-/// - 指标名后跟 `[` 且指标名位于"向量选择器上下文" → 无标签的范围向量（追加花括号）
-/// - 指标名后跟 `(` → 函数调用，不注入
-/// - 指标名后跟 `)` → 标签名参数（如 `by(instance)`），不注入
-/// - 指标名后跟其他标识符字符 → 关键字/标签名（如 `by(instance)`），不注入
-/// - `[5m]` 等范围区间内的 `m` 不被误识别（前有数字且在 `[` 内）
-/// - PromQL 关键字和聚合操作符（`avg`、`sum`、`by`、`on` 等）不注入
+#[allow(dead_code)] // 保留供归属查询和未来使用
 fn inject_label_filter_into_vector_selectors(expr: &str, label_filter: &str) -> String {
     let bytes = expr.as_bytes();
     let len = bytes.len();
@@ -723,6 +780,7 @@ fn is_inside_range_vector_duration(expr: &str, pos: usize) -> bool {
 }
 
 /// PromQL 关键字和聚合操作符，不应被当作向量选择器注入标签。
+#[allow(dead_code)] // 保留供 append_label_filter 使用
 const PROMQL_KEYWORDS: &[&str] = &[
     // 聚合子句关键字
     "by",
@@ -753,112 +811,31 @@ const PROMQL_KEYWORDS: &[&str] = &[
 ];
 
 /// 判断标识符是否为 PromQL 关键字或聚合操作符。
+#[allow(dead_code)]
 fn is_promql_keyword(s: &str) -> bool {
     PROMQL_KEYWORDS.contains(&s)
 }
 
 /// 判断字节是否是 Prometheus 指标名的首字符：`[a-zA-Z_:]`
+#[allow(dead_code)]
 fn is_metric_name_start_char(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_' || b == b':'
 }
 
 /// 判断字节是否是 Prometheus 指标名的组成字符：`[a-zA-Z0-9_:]`
+#[allow(dead_code)]
 fn is_metric_name_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b':'
 }
 
 /// 判断字符串是否为合法的 Prometheus 指标名：`[a-zA-Z_:][a-zA-Z0-9_:]*`
+#[allow(dead_code)]
 fn is_simple_metric_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
-/// 查询单个主机指标，先尝试主 label_filter，若返回空则回退用 nn_label_filter。
-///
-/// 典型场景：IP 匹配 instance 返回空（node_exporter 的 instance 标签可能使用
-/// 主机名而非 IP），回退用 node_name 匹配 instance。
-async fn query_host_metric_with_fallback(
-    ctx: &mut QueryContext<'_>,
-    expr: &str,
-    label_filter: &str,
-    nn_label_filter: Option<&str>,
-    ip: &str,
-    label: &str,
-) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
-    let promql = append_label_filter(expr, label_filter);
-    let result = query_host_metric_value(ctx, &promql, ip, label).await;
-    if result.0.is_none() {
-        if let Some(nn_filter) = nn_label_filter {
-            tracing::info!(
-                "主机 {ip} {label} IP 匹配无数据，回退用 node_name 匹配（设备类型「{}」）",
-                ctx.spec.display_name,
-            );
-            let nn_promql = append_label_filter(expr, nn_filter);
-            return query_host_metric_value(ctx, &nn_promql, ip, &format!("{label}(node_name回退)")).await;
-        }
-    }
-    result
-}
-
-/// 查询单个主机指标，合并所有 series 的点后聚合为 (avg, peak, peak_time)。
-///
-/// 注意：主机指标可能返回多条 series（如 per-core CPU），此时同一时间戳
-/// 会有多个值。我们按时间戳分组取均值后再聚合，避免 `merge_points_into`
-/// 的去重逻辑丢弃同一时间戳的多个观测值。
-async fn query_host_metric_value(
-    ctx: &mut QueryContext<'_>,
-    promql: &str,
-    ip: &str,
-    label: &str,
-) -> (Option<f64>, Option<f64>, Option<DateTime<Utc>>) {
-    match ctx.fetcher.query_range(promql, ctx.start, ctx.end, ctx.step).await {
-        Ok(series) => {
-            // 收集所有 series 的点（不去重），按时间戳分组取均值
-            // 防御性过滤：与 aggregate 一致，先排除 NaN/Inf 避免均值被污染。
-            let mut all_points: Vec<(DateTime<Utc>, f64)> = Vec::new();
-            for s in &series {
-                all_points.extend(s.points.iter().copied().filter(|(_, v)| v.is_finite()));
-            }
-            if all_points.is_empty() {
-                tracing::warn!(
-                    "主机 {ip} {label} 指标无有效数据点（设备类型「{}」，查询返回 {} 条 series 但无有限值），PromQL: {promql}",
-                    ctx.spec.display_name,
-                    series.len(),
-                );
-                return (None, None, None);
-            }
-            // 按时间戳排序，同时间戳的点相邻
-            all_points.sort_by_key(|(ts, _)| *ts);
-            // 按时间戳分组取均值：同一时间戳的多条 series（如 per-core）
-            // 取均值后再聚合，避免去重丢弃数据导致均值偏高。
-            let mut averaged: Vec<(DateTime<Utc>, f64)> = Vec::new();
-            let mut i = 0;
-            while i < all_points.len() {
-                let ts = all_points[i].0;
-                let mut sum = 0.0_f64;
-                let mut count = 0usize;
-                while i < all_points.len() && all_points[i].0 == ts {
-                    sum += all_points[i].1;
-                    count += 1;
-                    i += 1;
-                }
-                averaged.push((ts, sum / count as f64));
-            }
-            aggregate(&averaged).map_or(
-                (None, None, None),
-                |s| (Some(s.avg), Some(s.peak), Some(s.peak_time)),
-            )
-        }
-        Err(e) => {
-            ctx.out.push_warning(format!(
-                "主机 {ip} {label} 指标查询失败（设备类型「{}」）：{e}，PromQL: {promql}",
-                ctx.spec.display_name,
-            ));
-            (None, None, None)
-        }
-    }
-}
 
 /// 将 incoming 的点合并进 existing，按时间戳排序并去重（同一时间戳保留最大值）。
 ///
@@ -2560,9 +2537,9 @@ mod tests {
         assert!(r.host_cpu_avg.is_none());
         // 内存查询返回空也应为 N/A
         assert!(r.host_mem_avg.is_none());
-        // 应产生 Warning
+        // 应产生 Warning（fetch_with_warning 对查询失败会发出 Warning）
         assert!(
-            out.warnings.iter().any(|w| w.contains("CPU利用率") && w.contains("查询失败")),
+            out.warnings.iter().any(|w| w.contains("连接失败")),
             "CPU 查询失败应产生 Warning，实际：{:?}",
             out.warnings
         );
