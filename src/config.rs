@@ -933,6 +933,34 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 });
             }
         }
+        // 单源内 device_types 重复会导致同一设备类型被采集两次、产出重复行。
+        let mut seen_dt: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for dt in &src.device_types {
+            if !seen_dt.insert(dt.as_str()) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "数据源「{}」的 device_types 包含重复项「{}」",
+                        src.name, dt
+                    ),
+                });
+            }
+        }
+    }
+    // 跨源 device_types 重复：两个数据源监控同一设备类型会导致记录重复。
+    let mut global_dt: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for src in &cfg.sources {
+        for dt in &src.device_types {
+            if !global_dt.insert(dt.as_str()) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "设备类型「{}」在多个数据源中被引用（重复出现在数据源「{}」中），会导致重复采集",
+                        dt, src.name
+                    ),
+                });
+            }
+        }
     }
     // 校验设备配方中的主机指标配置
     for (key, spec) in &cfg.devices {
@@ -1549,6 +1577,32 @@ mod tests {
         assert!(r.is_err(), "空 device_types 应被拒绝");
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("device_types"), "错误消息应提及 device_types");
+    }
+
+    #[test]
+    fn config_rejects_duplicate_device_types_within_source() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].device_types.push("nvidia_a10".into()); // 重复
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "单源内重复 device_types 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("重复项"), "错误消息应提及重复");
+    }
+
+    #[test]
+    fn config_rejects_duplicate_device_types_across_sources() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        // 添加第二个数据源，引用相同的设备类型
+        cfg.sources.push(crate::config::SourceConfig {
+            name: "source2".into(),
+            url: "http://prometheus2:9090".into(),
+            timeout_secs: 30,
+            device_types: vec!["nvidia_a10".into()], // 与 source1 重复
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "跨源重复 device_types 应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("多个数据源"), "错误消息应提及跨源重复");
     }
 
     #[test]
