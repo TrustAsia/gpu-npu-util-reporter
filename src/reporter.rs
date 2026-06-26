@@ -322,12 +322,12 @@ fn cell_value(
             .map(ts)
             .map_or(CellValue::Na, CellValue::Text),
         "主机句柄数平均值" => rec.host_handle_avg.map_or(CellValue::Na, |v| {
-            // 句柄数为整数，舍弃小数部分
-            CellValue::Count(v.trunc() as usize)
+            // 句柄数为整数，舍弃小数部分；负值 clamp 到 0 防止 as usize 溢出
+            CellValue::Count(v.max(0.0).trunc() as usize)
         }),
         "主机句柄数峰值" => rec
             .host_handle_peak
-            .map_or(CellValue::Na, |v| CellValue::Count(v.trunc() as usize)),
+            .map_or(CellValue::Na, |v| CellValue::Count(v.max(0.0).trunc() as usize)),
         "主机句柄数峰值出现时间" => rec
             .host_handle_peak_time
             .map(ts)

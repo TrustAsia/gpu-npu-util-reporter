@@ -476,41 +476,35 @@ async fn collect_host_metrics(
 /// 2. **带标签的简单指标**（如 `metric{mode="idle"}`）：在闭合 `}` 前追加
 ///    → `metric{mode="idle", instance=~"..."}`
 ///
-/// 3. **复杂表达式**（含函数调用、二元运算等）：使用 `and on(instance)` 过滤
-///    → `(expr) and on(instance) (up{label_filter})`
+/// 3. **复杂表达式**（含函数调用、二元运算等）：在表达式内部**每个向量选择器**
+///    中注入标签过滤器，而非使用 `and on(instance)` 外部过滤。
 ///
-/// 原因：PromQL 中 `{...}` 标签选择器只能紧跟在向量选择器（指标名）后面，
-/// 不能跟在闭括号 `)` 后面。对于复杂表达式（如
-/// `100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)`），
-/// 既不能在最后的 `}` 前插入（会破坏 `[5m]` 范围向量语法），
-/// 也不能在最外层追加 `{...}`（PromQL 不允许 `){...}` 语法）。
-/// 使用 `and on(instance)` + `up` 过滤向量是正确且安全的做法：
-/// `up` 是 Prometheus 内建指标，始终存在，仅用于提供标签过滤。
+///    例：`100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)`
+///    →  `100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle", instance=~"..."}[5m])) * 100)`
+///
+///    例：`100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)`
+///    →  `100 - (node_memory_MemAvailable_bytes{instance=~"..."} / node_memory_MemTotal_bytes{instance=~"..."} * 100)`
+///
+/// 原因：之前 v1.9.4 使用 `and on(instance) (up{label_filter})` 外部过滤，但存在
+/// 两个问题：(a) `up` 指标在某些 Prometheus 配置下不存在；(b) `and on(instance)`
+/// 要求左右两侧的 `instance` 标签值完全一致，但不同抓取作业的 `instance` 标签
+/// 格式可能不同（含/不含端口），导致匹配不上而返回空结果。
+/// 在向量选择器内部注入标签过滤器是更可靠的做法——它直接在数据源层面过滤，
+/// 不依赖任何辅助指标，也不存在标签值不匹配的问题。
 fn append_label_filter(expr: &str, label_filter: &str) -> String {
     let trimmed = expr.trim();
 
-    // 判断表达式是否为"简单指标名"或"简单指标 + 可选标签选择器"：
-    //   合法形式：metric、metric{...} 或 metric{}，
-    //   其中 { 之前只有指标名字符，且 } 之后无内容（排除 metric{...}[5m]）。
-    //   指标名匹配：[a-zA-Z_:][a-zA-Z0-9_:]*
-
-    // 情况 1：无花括号 → 可能是简单指标名，也可能是无标签的复杂表达式
-    if !trimmed.contains('{') {
-        // 检查是否为简单指标名（仅含指标名字符，无括号/运算符）
-        if is_simple_metric_name(trimmed) {
-            return format!("{}{{{}}}", trimmed, label_filter);
-        }
-        // 含括号/运算符但无花括号 → 复杂表达式，走 and on 路径
-        return format!("({trimmed}) and on(instance) (up{{{label_filter}}})");
+    // 快速路径：简单指标名（无花括号、无括号/运算符）
+    if is_simple_metric_name(trimmed) {
+        return format!("{}{{{}}}", trimmed, label_filter);
     }
 
-    // 情况 2/3：含花括号
+    // 快速路径：单指标+标签选择器（如 metric{mode="idle"}）
+    // 判断条件：第一个 { 前是指标名，且整个表达式只有一个顶层 {}
     if let Some(brace_pos) = trimmed.find('{') {
         let before_brace = &trimmed[..brace_pos];
-        let is_simple_metric = is_simple_metric_name(before_brace);
-        if is_simple_metric {
-            // 简单指标 + 标签选择器：在 } 前追加
-            // 找到匹配的闭合 }
+        if is_simple_metric_name(before_brace) {
+            // 找匹配的闭合 }
             let mut depth = 0i32;
             let mut close_pos = None;
             for (i, ch) in trimmed[brace_pos..].char_indices() {
@@ -527,30 +521,221 @@ fn append_label_filter(expr: &str, label_filter: &str) -> String {
                 }
             }
             if let Some(close) = close_pos {
-                // 校验：闭合 } 之后不应有更多内容（排除 metric{...}[5m] 等范围向量）
                 let after_close = trimmed[close + 1..].trim();
                 if after_close.is_empty() {
+                    // 单指标+标签，{} 后无内容
                     let between = trimmed[brace_pos + 1..close].trim();
                     if between.is_empty() {
-                        // 空标签选择器如 metric{} → metric{label_filter}
                         return format!("{}{{{}}}", before_brace, label_filter);
                     }
-                    // 非空标签选择器 → 在 } 前追加
                     return format!(
                         "{}, {}}}",
                         &trimmed[..close],
                         label_filter
                     );
                 }
-                // 闭合 } 之后有内容（如 [5m]），视为复杂表达式，走 and on 路径
+                // } 后有内容（如 [5m]），不能走快速路径，走下方通用注入逻辑
             }
         }
     }
 
-    // 复杂表达式——使用 and on(instance) 过滤
-    // 用 up 指标作为过滤向量：up 是 Prometheus 内建指标，始终存在，
-    // 仅用于提供标签过滤能力，不影响计算结果。
-    format!("({trimmed}) and on(instance) (up{{{label_filter}}})")
+    // 通用路径：在表达式内部每个向量选择器中注入标签过滤器
+    inject_label_filter_into_vector_selectors(trimmed, label_filter)
+}
+
+/// 在 PromQL 表达式内部的每个向量选择器中注入标签过滤器。
+///
+/// 遍历表达式，找到所有**向量选择器**（指标名后跟 `{` 或裸指标名后跟 `[` 或
+/// 表达式末尾/运算符），将 `label_filter` 注入到花括号内（如有）或追加花括号。
+///
+/// 关键区分规则：
+/// - 指标名后跟 `{` → 带标签的向量选择器（注入到花括号内）
+/// - 指标名后跟 `[` 且指标名位于"向量选择器上下文" → 无标签的范围向量（追加花括号）
+/// - 指标名后跟 `(` → 函数调用，不注入
+/// - 指标名后跟 `)` → 标签名参数（如 `by(instance)`），不注入
+/// - 指标名后跟其他标识符字符 → 关键字/标签名（如 `by(instance)`），不注入
+/// - `[5m]` 等范围区间内的 `m` 不被误识别（前有数字且在 `[` 内）
+/// - PromQL 关键字和聚合操作符（`avg`、`sum`、`by`、`on` 等）不注入
+fn inject_label_filter_into_vector_selectors(expr: &str, label_filter: &str) -> String {
+    let bytes = expr.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(expr.len() + label_filter.len() * 4);
+    let mut pos = 0;
+
+    while pos < len {
+        // 检查当前位置是否是指标名的开始：[a-zA-Z_:]
+        if is_metric_name_start_char(bytes[pos]) {
+            // 跳过范围向量时间单位（如 [5m] 中的 m）
+            if is_inside_range_vector_duration(expr, pos) {
+                result.push(bytes[pos] as char);
+                pos += 1;
+                continue;
+            }
+
+            // 读取完整的标识符
+            let name_start = pos;
+            while pos < len && is_metric_name_char(bytes[pos]) {
+                pos += 1;
+            }
+            let name = &expr[name_start..pos];
+            let name_end = pos;
+
+            // 跳过 PromQL 关键字和聚合操作符
+            if is_promql_keyword(name) {
+                result.push_str(name);
+                continue;
+            }
+
+            // 根据标识符后面的字符判断是否为向量选择器
+            if name_end < len && bytes[name_end] == b'{' {
+                // 标识符后跟 `{` → 带标签的向量选择器
+                // 在花括号内的闭合 `}` 前追加 label_filter
+                result.push_str(name);
+                result.push('{');
+
+                let mut depth = 1i32;
+                pos = name_end + 1; // 跳过开 {
+                let content_start = pos;
+
+                // 扫描花括号内容，正确处理嵌套和字符串字面量
+                let mut in_string = false;
+                let mut string_escape = false;
+                while pos < len && depth > 0 {
+                    let ch = bytes[pos];
+                    if in_string {
+                        if string_escape {
+                            string_escape = false;
+                        } else if ch == b'\\' {
+                            string_escape = true;
+                        } else if ch == b'"' {
+                            in_string = false;
+                        }
+                    } else if ch == b'"' {
+                        in_string = true;
+                    } else if ch == b'{' {
+                        depth += 1;
+                    } else if ch == b'}' {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        pos += 1;
+                    }
+                }
+
+                // pos 现在指向匹配的 `}`
+                let content = &expr[content_start..pos];
+                let trimmed_content = content.trim();
+                if trimmed_content.is_empty() {
+                    result.push_str(label_filter);
+                } else {
+                    result.push_str(content);
+                    result.push_str(", ");
+                    result.push_str(label_filter);
+                }
+                result.push('}');
+                pos += 1; // 跳过 }
+            } else if name_end < len
+                && (bytes[name_end] == b'('
+                    || is_metric_name_char(bytes[name_end])
+                    || bytes[name_end] == b')')
+            {
+                // 标识符后跟 `(`（函数调用）、其他标识符字符（关键字参数如 by(instance)）、
+                // 或 `)`（标签名参数如 by(instance)）→ 不是向量选择器
+                result.push_str(name);
+            } else {
+                // 标识符后不跟 `{`、`(`、`)`、其他标识符字符
+                // → 裸向量选择器，追加 {label_filter}
+                result.push_str(name);
+                result.push('{');
+                result.push_str(label_filter);
+                result.push('}');
+            }
+        } else {
+            // 非标识符字符（数字、括号、运算符等），原样复制
+            result.push(bytes[pos] as char);
+            pos += 1;
+        }
+    }
+
+    result
+}
+
+/// 判断位置 `pos` 的标识符是否在范围向量时间区间内（如 `[5m]` 中的 `m`）。
+///
+/// 检查方法：向前查找最近的非空白字符，如果是数字且该数字在 `[` 之后，
+/// 则当前位置是时间单位而非指标名。
+fn is_inside_range_vector_duration(expr: &str, pos: usize) -> bool {
+    let bytes = expr.as_bytes();
+    let mut i = pos;
+    while i > 0 {
+        i -= 1;
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        if b.is_ascii_digit() {
+            // 找到数字，继续向前查找是否在 `[` 之后
+            let mut j = i;
+            while j > 0 {
+                j -= 1;
+                let c = bytes[j];
+                if c.is_ascii_whitespace() || c.is_ascii_digit() {
+                    continue;
+                }
+                if c == b'[' {
+                    return true;
+                }
+                break;
+            }
+        }
+        break;
+    }
+    false
+}
+
+/// PromQL 关键字和聚合操作符，不应被当作向量选择器注入标签。
+const PROMQL_KEYWORDS: &[&str] = &[
+    // 聚合子句关键字
+    "by",
+    "without",
+    "on",
+    "ignoring",
+    "group_left",
+    "group_right",
+    // 二元运算符关键字
+    "and",
+    "or",
+    "unless",
+    "bool",
+    // 聚合操作符
+    "sum",
+    "avg",
+    "count",
+    "min",
+    "max",
+    "stddev",
+    "stdvar",
+    "topk",
+    "bottomk",
+    "quantile",
+    "count_values",
+    // PromQL 内置指标（用于目标状态监控，不是用户数据指标）
+    "up",
+];
+
+/// 判断标识符是否为 PromQL 关键字或聚合操作符。
+fn is_promql_keyword(s: &str) -> bool {
+    PROMQL_KEYWORDS.contains(&s)
+}
+
+/// 判断字节是否是 Prometheus 指标名的首字符：`[a-zA-Z_:]`
+fn is_metric_name_start_char(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || b == b':'
+}
+
+/// 判断字节是否是 Prometheus 指标名的组成字符：`[a-zA-Z0-9_:]`
+fn is_metric_name_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b':'
 }
 
 /// 判断字符串是否为合法的 Prometheus 指标名：`[a-zA-Z_:][a-zA-Z0-9_:]*`
@@ -944,12 +1129,19 @@ async fn ownership_for(
         let ns = last_label_value(&series, &ctx.spec.labels.namespace);
         let pod = last_label_value(&series, &ctx.spec.labels.pod);
         let ct = last_label_value(&series, &ctx.spec.labels.container);
-        return (ns, pod, ct);
+        // 仅当至少一个归属标签非空时返回，否则回退到显存指标
+        // （与 instant 模式的逐字段回退语义一致：核心指标有数据但归属标签全空时，
+        // 不应直接返回三个空串，而应尝试从显存指标取归属）
+        if !ns.is_empty() || !pod.is_empty() || !ct.is_empty() {
+            return (ns, pod, ct);
+        }
     }
 
-    // 核心指标无数据（如该卡只有显存数据），回退到显存指标查询归属。
+    // 核心指标无数据或归属全空，回退到显存指标查询归属。
     // 依次尝试所有显存指标（含 fallback 链），因为 DirectMetric 的主指标
     // 无数据时，fallback 的 used 指标仍可能有归属标签。
+    // 同样，如果某指标有数据但归属标签全空，继续尝试下一个指标（与 instant
+    // 模式逐字段回退语义一致）。
     let mem_names = ctx.spec.memory.ownership_metric_names();
     for mem_metric in &mem_names {
         if let Some(mem_series) =
@@ -958,7 +1150,9 @@ async fn ownership_for(
             let ns = last_label_value(&mem_series, &ctx.spec.labels.namespace);
             let pod = last_label_value(&mem_series, &ctx.spec.labels.pod);
             let ct = last_label_value(&mem_series, &ctx.spec.labels.container);
-            return (ns, pod, ct);
+            if !ns.is_empty() || !pod.is_empty() || !ct.is_empty() {
+                return (ns, pod, ct);
+            }
         }
     }
     (String::new(), String::new(), String::new())
@@ -2410,18 +2604,20 @@ mod tests {
 
     #[test]
     fn append_label_filter_complex_expression() {
-        // 复杂表达式（含 rate() 函数）——不能在函数内部的 {mode="idle"} 中插入，
-        // 也不能在最外层追加 {}（PromQL 不允许 ){} 语法）。
-        // 正确做法：使用 and on(instance) + up 过滤向量。
+        // 复杂表达式：在内部向量选择器中注入标签过滤器
+        // rate(node_cpu_seconds_total{mode="idle"}[5m]) 中的指标名带花括号，
+        // 在 } 前追加 instance 过滤
         let result = append_label_filter(
             r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#,
             r#"instance=~"^1\.2\.3\.4.*""#,
         );
-        // 应使用 and on(instance) 方式
-        assert!(result.contains("and on(instance)"));
-        assert!(result.contains(r#"up{instance=~"^1\.2\.3\.4.*"}"#));
-        // 内部的 {mode="idle"} 应保持不变
-        assert!(result.contains(r#"node_cpu_seconds_total{mode="idle"}[5m]"#));
+        // 应在内部 {mode="idle"} 中追加，而非使用 and on(instance)
+        assert!(result.contains(r#"node_cpu_seconds_total{mode="idle", instance=~"^1\.2\.3\.4.*"}"#));
+        // [5m] 应保持不变
+        assert!(result.contains("[5m]"));
+        // 不应包含 and on(instance) 或 up
+        assert!(!result.contains("and on(instance)"));
+        assert!(!result.contains("up{"));
     }
 
     #[test]
@@ -2439,38 +2635,37 @@ mod tests {
 
     #[test]
     fn append_label_filter_division_expression() {
-        // 二元运算表达式 → and on(instance) 方式
+        // 二元运算表达式：两个裸指标名各追加 {label_filter}
         let result = append_label_filter(
             r#"100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)"#,
             r#"instance=~"^1\.2\.3\.4.*""#,
         );
-        assert!(result.contains("and on(instance)"));
-        assert!(result.contains(r#"up{instance=~"^1\.2\.3\.4.*"}"#));
+        assert!(result.contains(r#"node_memory_MemAvailable_bytes{instance=~"^1\.2\.3\.4.*"}"#));
+        assert!(result.contains(r#"node_memory_MemTotal_bytes{instance=~"^1\.2\.3\.4.*"}"#));
+        // 不应包含 and on(instance) 或 up
+        assert!(!result.contains("and on(instance)"));
     }
 
     #[test]
     fn append_label_filter_rate_without_labels() {
-        // rate(metric[5m]) 无花括号，含括号 → 不是简单指标名 → and on(instance) 路径
+        // rate(metric[5m]) → 裸指标名追加 {label_filter}
         let result = append_label_filter(
             r#"rate(node_cpu_seconds_total[5m])"#,
             r#"instance=~"^1\.2\.3\.4.*""#,
         );
-        assert!(result.contains("and on(instance)"));
-        assert!(result.contains(r#"up{instance=~"^1\.2\.3\.4.*"}"#));
+        assert!(result.contains(r#"node_cpu_seconds_total{instance=~"^1\.2\.3\.4.*"}"#));
+        assert!(result.contains("[5m]"));
     }
 
     #[test]
     fn append_label_filter_rate_with_labels() {
-        // rate(metric{mode="idle"}[5m]) → 标签选择器后有 [5m]，
-        // 闭合 } 之后有内容 → 走 and on 路径
+        // rate(metric{mode="idle"}[5m]) → 在 } 前追加
         let result = append_label_filter(
             r#"rate(node_cpu_seconds_total{mode="idle"}[5m])"#,
             r#"instance=~"^1\.2\.3\.4.*""#,
         );
-        assert!(result.contains("and on(instance)"));
-        assert!(result.contains(r#"up{instance=~"^1\.2\.3\.4.*"}"#));
-        // 内部标签选择器应保持不变
-        assert!(result.contains(r#"node_cpu_seconds_total{mode="idle"}[5m]"#));
+        assert!(result.contains(r#"node_cpu_seconds_total{mode="idle", instance=~"^1\.2\.3\.4.*"}"#));
+        assert!(result.contains("[5m]"));
     }
 
     #[test]
