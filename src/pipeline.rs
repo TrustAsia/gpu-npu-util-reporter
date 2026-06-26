@@ -750,6 +750,7 @@ fn inject_label_filter_into_vector_selectors(expr: &str, label_filter: &str) -> 
 ///
 /// 检查方法：向前查找最近的非空白字符，如果是数字且该数字在 `[` 之后，
 /// 则当前位置是时间单位而非指标名。
+#[allow(dead_code)] // 保留供 append_label_filter 使用
 fn is_inside_range_vector_duration(expr: &str, pos: usize) -> bool {
     let bytes = expr.as_bytes();
     let mut i = pos;
@@ -842,7 +843,7 @@ fn is_simple_metric_name(s: &str) -> bool {
 /// 供 `merge_into`（pipeline 层按 join key 合并）和
 /// `merge_series`（fetcher 层按 label 合并）复用。
 /// 注意：主机指标的多 series 合并不应使用此函数（会丢弃同时间戳的多观测值），
-/// 应使用 `query_host_metric_value` 中的按时间戳分组取均值逻辑。
+/// 应使用 `aggregate_host_metric_series` 中的按时间戳分组取均值逻辑。
 pub fn merge_points_into(
     existing: &mut Vec<(chrono::DateTime<chrono::Utc>, f64)>,
     incoming: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
