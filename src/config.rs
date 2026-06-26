@@ -116,7 +116,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             console_level: default_console_level(),
-            file_enabled: false,
+            file_enabled: true,
             file_level: default_file_level(),
             file_path: default_log_path(),
         }
@@ -573,7 +573,7 @@ thresholds:
 #
 log:
   console_level: "info"
-  file_enabled: false
+  file_enabled: true
   file_level: "debug"
   file_path: "./logs/{{now}}.log"
 
@@ -602,7 +602,7 @@ log:
 #        未识别的变量（如 {{unknown}}）会原样保留在路径中。
 #
 report:
-  output_path: "./utilization-report.xlsx"
+  output_path: "./{{start}}-{{end}}-utilization-report-{{now}}.xlsx"
   query_step_secs: 60
 
 # =============================================================================
@@ -635,6 +635,8 @@ report:
 # namespace         Namespace
 # pod               Pod
 # container         容器名称
+# range_start       数据开始时间
+# range_end         数据结束时间
 # time_range        取值时间范围
 # core_avg          核心利用率平均值
 # core_peak         核心利用率峰值
@@ -703,6 +705,12 @@ database:
     - local_name: "container"
       db_name: "container"
       comment: "容器名称"
+    - local_name: "range_start"
+      db_name: "range_start"
+      comment: "数据开始时间"
+    - local_name: "range_end"
+      db_name: "range_end"
+      comment: "数据结束时间"
     - local_name: "time_range"
       db_name: "time_range"
       db_type: "VARCHAR(64) DEFAULT NULL"
@@ -725,6 +733,33 @@ database:
     - local_name: "mem_peak_time"
       db_name: "mem_peak_time"
       comment: "显存占用率峰值出现时间"
+    - local_name: "host_cpu_avg"
+      db_name: "host_cpu_avg"
+      comment: "主机CPU利用率平均值(0-100%)"
+    - local_name: "host_cpu_peak"
+      db_name: "host_cpu_peak"
+      comment: "主机CPU利用率峰值(0-100%)"
+    - local_name: "host_cpu_peak_time"
+      db_name: "host_cpu_peak_time"
+      comment: "主机CPU利用率峰值出现时间"
+    - local_name: "host_mem_avg"
+      db_name: "host_mem_avg"
+      comment: "主机内存利用率平均值(0-100%)"
+    - local_name: "host_mem_peak"
+      db_name: "host_mem_peak"
+      comment: "主机内存利用率峰值(0-100%)"
+    - local_name: "host_mem_peak_time"
+      db_name: "host_mem_peak_time"
+      comment: "主机内存利用率峰值出现时间"
+    - local_name: "host_handle_avg"
+      db_name: "host_handle_avg"
+      comment: "主机句柄数平均值"
+    - local_name: "host_handle_peak"
+      db_name: "host_handle_peak"
+      comment: "主机句柄数峰值"
+    - local_name: "host_handle_peak_time"
+      db_name: "host_handle_peak_time"
+      comment: "主机句柄数峰值出现时间"
 "##;
     TEMPLATE
         .replace("__NVIDIA__", &indent_device(2, &nvidia_a10_spec()))

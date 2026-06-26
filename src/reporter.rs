@@ -240,6 +240,8 @@ fn cell_value(
         "Namespace" => CellValue::Text(rec.namespace.clone()),
         "Pod" => CellValue::Text(rec.pod.clone()),
         "容器名称" => CellValue::Text(rec.container.clone()),
+        "数据开始时间" => CellValue::Text(ts(rec.range_start)),
+        "数据结束时间" => CellValue::Text(ts(rec.range_end)),
         "取值时间范围" => CellValue::Text(format!(
             "{} ~ {}",
             rec.range_start

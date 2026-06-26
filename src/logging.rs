@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn log_config_default_values() {
         let cfg = LogConfig::default();
-        assert!(!cfg.file_enabled);
+        assert!(cfg.file_enabled);
         assert_eq!(cfg.console_level, "info");
         assert_eq!(cfg.file_level, "debug");
     }

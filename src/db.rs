@@ -252,9 +252,10 @@ async fn ensure_table(
         });
     }
 
-    // 检查多余的列
+    // 检查多余的列（排除 id 自增主键，它是自动管理的）
     let extra: Vec<&str> = existing_db_names
         .difference(&configured_db_names)
+        .filter(|col| **col != "id")
         .copied()
         .collect();
 
@@ -346,6 +347,8 @@ fn escape_mysql_string(s: &str) -> String {
 /// 生成 CREATE TABLE DDL。
 fn generate_create_ddl(cfg: &DatabaseConfig, mapped_cols: &[(&str, &str, &str, Option<&str>, &str)]) -> String {
     let mut lines = Vec::new();
+    // 自增主键列
+    lines.push("  `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY".into());
     for (_display_name, local_name, db_name, db_type, comment) in mapped_cols {
         let sql_type = db_type.unwrap_or_else(|| infer_sql_type(local_name));
         let comment_escaped = escape_mysql_string(comment);
@@ -387,6 +390,10 @@ fn generate_alter_ddl(
 ///
 /// 字段名是稳定标识符（如 "time_range"、"core_avg"），不受显示名变化影响。
 fn infer_sql_type(local_name: &str) -> &'static str {
+    // 数据开始/结束时间 → DATETIME
+    if local_name == "range_start" || local_name == "range_end" {
+        return "DATETIME NOT NULL";
+    }
     // 时间范围 → VARCHAR（"time_range" 是文本，不是单个时间点）
     if local_name == "time_range" || local_name.ends_with("_range") {
         return "VARCHAR(64) DEFAULT NULL";
@@ -399,9 +406,9 @@ fn infer_sql_type(local_name: &str) -> &'static str {
     if local_name.ends_with("_count") {
         return "INT DEFAULT NULL";
     }
-    // 句柄数 → DOUBLE（可能是非整数）
+    // 句柄数 → BIGINT（整数值）
     if local_name.starts_with("host_handle_") && !local_name.ends_with("_time") && !local_name.ends_with("_count") {
-        return "DOUBLE DEFAULT NULL";
+        return "BIGINT DEFAULT NULL";
     }
     // 百分比/绝对值列 → DOUBLE（avg/peak 后缀）
     if local_name.ends_with("_avg") || local_name.ends_with("_peak") {
@@ -550,9 +557,15 @@ mod tests {
     }
 
     #[test]
+    fn infer_sql_type_range_start_end() {
+        assert_eq!(infer_sql_type("range_start"), "DATETIME NOT NULL");
+        assert_eq!(infer_sql_type("range_end"), "DATETIME NOT NULL");
+    }
+
+    #[test]
     fn infer_sql_type_handle_columns() {
-        assert_eq!(infer_sql_type("host_handle_avg"), "DOUBLE DEFAULT NULL");
-        assert_eq!(infer_sql_type("host_handle_peak"), "DOUBLE DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_handle_avg"), "BIGINT DEFAULT NULL");
+        assert_eq!(infer_sql_type("host_handle_peak"), "BIGINT DEFAULT NULL");
     }
 
     #[test]
@@ -590,6 +603,7 @@ mod tests {
         ];
         let ddl = generate_create_ddl(&cfg, &cols);
         assert!(ddl.starts_with("CREATE TABLE `gpu_util`"));
+        assert!(ddl.contains("`id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY"));
         assert!(ddl.contains("`host_ip` VARCHAR(255)"));
         assert!(ddl.contains("`core_avg` DOUBLE"));
         assert!(ddl.contains("COMMENT '主机IP地址'"));
