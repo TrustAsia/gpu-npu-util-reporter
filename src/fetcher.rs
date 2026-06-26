@@ -216,20 +216,12 @@ impl MetricFetcher for PrometheusFetcher {
     async fn query_instant(&self, promql: &str) -> Result<Vec<Series>, AppError> {
         // 使用完整 base_url（含凭据，reqwest 会提取 Basic Auth 并添加到 Auth 头）。
         let url = format!("{}/api/v1/query", self.base_url.trim_end_matches('/'));
-        let req = self
+        let resp = self
             .client
             .get(&url)
             .query(&[("query", promql)])
             .timeout(self.timeout)
-            .build()
-            .map_err(|e| self.prom_error(format_args!("构建请求失败：{e}")))?;
-        tracing::debug!(
-            "query_instant 请求 URL: {}",
-            req.url()
-        );
-        let resp = self
-            .client
-            .execute(req)
+            .send()
             .await
             .map_err(|e| self.prom_error(format_args!("连接失败：{e}")))?;
         let resp = resp
@@ -252,7 +244,7 @@ impl PrometheusFetcher {
     ) -> Result<Vec<Series>, AppError> {
         // 使用完整 base_url（含凭据，reqwest 会提取 Basic Auth 并添加到 Auth 头）。
         let url = format!("{}/api/v1/query_range", self.base_url.trim_end_matches('/'));
-        let req = self
+        let resp = self
             .client
             .get(&url)
             .query(&[
@@ -262,15 +254,7 @@ impl PrometheusFetcher {
                 ("step", &step.num_seconds().to_string()),
             ])
             .timeout(self.timeout)
-            .build()
-            .map_err(|e| self.prom_error(format_args!("构建请求失败：{e}")))?;
-        tracing::debug!(
-            "query_range 请求 URL: {}",
-            req.url()
-        );
-        let resp = self
-            .client
-            .execute(req)
+            .send()
             .await
             .map_err(|e| self.prom_error(format_args!("连接失败：{e}")))?;
         let resp = resp
