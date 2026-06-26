@@ -420,21 +420,70 @@ async fn collect_host_metrics(
     // 对每个指标发一次不带 instance 过滤的查询，获取所有主机数据
     // CPU 利用率
     let cpu_series = if let Some(cpu_expr) = &hm.cpu_expr {
-        fetch_with_warning(ctx, cpu_expr).await
+        let series = fetch_with_warning(ctx, cpu_expr).await;
+        tracing::info!(
+            "主机指标 CPU 全量查询返回 {} 条 series（设备类型「{}」）",
+            series.len(),
+            ctx.spec.display_name,
+        );
+        // 调试：列出返回的 instance 值
+        let instances: Vec<String> = series
+            .iter()
+            .filter_map(|s| s.labels.get(&hm.host_label).cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        tracing::info!(
+            "主机指标 CPU instance 列表：{:?}",
+            instances,
+        );
+        series
     } else {
         Vec::new()
     };
 
     // 内存利用率
     let mem_series = if let Some(mem_expr) = &hm.mem_expr {
-        fetch_with_warning(ctx, mem_expr).await
+        let series = fetch_with_warning(ctx, mem_expr).await;
+        tracing::info!(
+            "主机指标 内存 全量查询返回 {} 条 series（设备类型「{}」）",
+            series.len(),
+            ctx.spec.display_name,
+        );
+        let instances: Vec<String> = series
+            .iter()
+            .filter_map(|s| s.labels.get(&hm.host_label).cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        tracing::info!(
+            "主机指标 内存 instance 列表：{:?}",
+            instances,
+        );
+        series
     } else {
         Vec::new()
     };
 
     // 句柄数
     let handle_series = if let Some(handle_expr) = &hm.handle_expr {
-        fetch_with_warning(ctx, handle_expr).await
+        let series = fetch_with_warning(ctx, handle_expr).await;
+        tracing::info!(
+            "主机指标 句柄数 全量查询返回 {} 条 series（设备类型「{}」）",
+            series.len(),
+            ctx.spec.display_name,
+        );
+        let instances: Vec<String> = series
+            .iter()
+            .filter_map(|s| s.labels.get(&hm.host_label).cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        tracing::info!(
+            "主机指标 句柄数 instance 列表：{:?}",
+            instances,
+        );
+        series
     } else {
         Vec::new()
     };
