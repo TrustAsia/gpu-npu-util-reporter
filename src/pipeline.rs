@@ -468,45 +468,71 @@ async fn collect_host_metrics(
 
 /// 将 `label_filter`（如 `instance=~"^192\.168\.1\.100.*"`）追加到 PromQL 表达式中。
 ///
-/// - 若表达式以 `}` 结尾（已有标签选择器如 `metric{mode="idle"}`），
-///   则在闭合 `}` 前插入 `, label_filter`，变成 `metric{mode="idle", instance=~"..."}`。
-/// - 若表达式无标签选择器（如 `metric` 或 `func(metric)`），
-///   则在表达式最外层追加 `{label_filter}`，变成 `metric{instance=~"..."}`。
+/// 策略：仅当表达式是**简单指标名**或**带标签的单指标**（如 `metric` 或
+/// `metric{label="val"}`）时，才尝试在已有标签选择器内追加；否则一律在最外层
+/// 包裹 `{label_filter}`。
+///
+/// 原因：复杂 PromQL 表达式（含函数调用、括号、二元运算等）中，最后一个 `}`
+/// 可能属于内部函数参数（如 `rate(metric{mode="idle"}[5m])` 中的 `{mode="idle"}`），
+/// 盲目在其前插入标签过滤器会破坏 `[5m]` 范围向量语法，导致 Prometheus 返回
+/// 400 Bad Request。正确做法是将过滤器加到最外层：
+/// `rate(metric{mode="idle"}[5m]){instance=~"..."}`——Prometheus 会对
+/// 函数结果的每个时间序列按标签过滤。
 fn append_label_filter(expr: &str, label_filter: &str) -> String {
     let trimmed = expr.trim();
-    // 查找最后一个 }，且它前面有匹配的 {
-    if let Some(last_brace) = trimmed.rfind('}') {
-        // 找到与这个 } 对应的 {——往前搜索
-        let mut depth = 0i32;
-        let mut open_pos = None;
-        for (i, ch) in trimmed[..last_brace].char_indices().rev() {
-            match ch {
-                '}' => depth += 1,
-                '{' => {
-                    if depth == 0 {
-                        open_pos = Some(i);
-                        break;
+
+    // 快速路径：无花括号 → 简单指标名，直接包裹
+    if !trimmed.contains('{') {
+        return format!("{}{{{}}}", trimmed, label_filter);
+    }
+
+    // 判断表达式是否为"简单指标 + 可选标签选择器"：
+    //   合法形式：metric{...} 或 metric{}，其中 {} 之前无括号/运算符。
+    //   若 { 前的字符是 ) ] } 或空白后的运算符 → 复杂表达式。
+    // 找到第一个 { 的位置，检查它之前是否只有指标名字符（字母/数字/下划线/冒号）。
+    if let Some(brace_pos) = trimmed.find('{') {
+        let before_brace = &trimmed[..brace_pos];
+        // 指标名匹配：[a-zA-Z_:][a-zA-Z0-9_:]*
+        // 如果 { 前的部分全是合法的指标名字符，则视为简单指标 + 标签选择器。
+        let is_simple_metric = !before_brace.is_empty()
+            && before_brace
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
+        if is_simple_metric {
+            // 简单指标 + 标签选择器：在 } 前追加
+            // 找到匹配的闭合 }
+            let mut depth = 0i32;
+            let mut close_pos = None;
+            for (i, ch) in trimmed[brace_pos..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close_pos = Some(brace_pos + i);
+                            break;
+                        }
                     }
-                    depth -= 1;
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-        if let Some(open) = open_pos {
-            let between = trimmed[open + 1..last_brace].trim();
-            if between.is_empty() {
-                // 空标签选择器如 metric{} → metric{label_filter}
-                return format!("{}{{{}}}", &trimmed[..open], label_filter);
+            if let Some(close) = close_pos {
+                let between = trimmed[brace_pos + 1..close].trim();
+                if between.is_empty() {
+                    // 空标签选择器如 metric{} → metric{label_filter}
+                    return format!("{}{{{}}}", before_brace, label_filter);
+                }
+                // 非空标签选择器 → 在 } 前追加
+                return format!(
+                    "{}, {}}}",
+                    &trimmed[..close],
+                    label_filter
+                );
             }
-            // 非空标签选择器 → 在 } 前追加
-            return format!(
-                "{}, {}}}",
-                &trimmed[..last_brace],
-                label_filter
-            );
         }
     }
-    // 无标签选择器——在表达式最外层包裹
+
+    // 复杂表达式——在最外层包裹
     format!("{}{{{}}}", trimmed, label_filter)
 }
 
@@ -2360,12 +2386,52 @@ mod tests {
 
     #[test]
     fn append_label_filter_complex_expression() {
+        // 复杂表达式（含 rate() 函数）——标签过滤器应在最外层包裹，
+        // 而非插入到 rate() 内部的 {mode="idle"} 中（会破坏 [5m] 范围向量语法，
+        // 导致 Prometheus 返回 400 Bad Request）。
         let result = append_label_filter(
             r#"100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)"#,
             r#"instance=~"^1\.2\.3\.4.*""#,
         );
-        // 复杂表达式，最后一个 } 对应 {mode="idle"}，应在 mode="idle" 后追加
-        assert!(result.contains(r#"mode="idle", instance=~"^1\.2\.3\.4.*""#));
+        // 最外层包裹：整个表达式后追加 {instance=~"..."}
+        assert!(result.ends_with(r#"{instance=~"^1\.2\.3\.4.*"}"#));
+        // 不应在内部 {mode="idle"} 中插入
+        assert!(!result.contains(r#"mode="idle", instance=~"#));
+        // 内部的 {mode="idle"} 应保持不变
+        assert!(result.contains(r#"node_cpu_seconds_total{mode="idle"}[5m]"#));
+    }
+
+    #[test]
+    fn append_label_filter_metric_with_colon() {
+        // 含冒号的指标名（如 namespace:metric）仍应识别为简单指标
+        let result = append_label_filter(
+            r#"ns:node_cpu{mode="idle"}"#,
+            r#"instance=~"^1\.2\.3\.4.*""#,
+        );
+        assert_eq!(
+            result,
+            r#"ns:node_cpu{mode="idle", instance=~"^1\.2\.3\.4.*"}"#
+        );
+    }
+
+    #[test]
+    fn append_label_filter_division_expression() {
+        // 二元运算表达式 → 最外层包裹
+        let result = append_label_filter(
+            r#"100 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)"#,
+            r#"instance=~"^1\.2\.3\.4.*""#,
+        );
+        assert!(result.ends_with(r#"{instance=~"^1\.2\.3\.4.*"}"#));
+    }
+
+    #[test]
+    fn append_label_filter_rate_without_labels() {
+        // rate(metric[5m]) 无标签选择器 → 最外层包裹
+        let result = append_label_filter(
+            r#"rate(node_cpu_seconds_total[5m])"#,
+            r#"instance=~"^1\.2\.3\.4.*""#,
+        );
+        assert!(result.ends_with(r#"{instance=~"^1\.2\.3\.4.*"}"#));
     }
 
     #[test]
