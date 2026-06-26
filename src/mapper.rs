@@ -24,6 +24,8 @@ use std::collections::HashMap;
 /// 报表核心基础列（始终出现）。
 const CORE_BASE_COLUMNS: &[&str] = &[
     "数据来源",
+    "数据开始时间",
+    "数据结束时间",
     "主机IP",
     "节点名称",
     "计算卡编号",
@@ -31,8 +33,6 @@ const CORE_BASE_COLUMNS: &[&str] = &[
     "Namespace",
     "Pod",
     "容器名称",
-    "数据开始时间",
-    "数据结束时间",
     "取值时间范围",
     "核心利用率平均值",
     "核心利用率峰值",
@@ -54,6 +54,8 @@ const CORE_BASE_COLUMNS: &[&str] = &[
 /// 不受报表显示名变化影响。
 pub const CORE_BASE_LOCAL_NAMES: &[&str] = &[
     "source_name",
+    "range_start",
+    "range_end",
     "host_ip",
     "node_name",
     "card_id",
@@ -61,8 +63,6 @@ pub const CORE_BASE_LOCAL_NAMES: &[&str] = &[
     "namespace",
     "pod",
     "container",
-    "range_start",
-    "range_end",
     "time_range",
     "core_avg",
     "core_peak",
