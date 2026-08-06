@@ -8,12 +8,17 @@
 //! 列映射通过本地字段名（local_name）而非报表显示名进行，
 //! 确保映射不受显示名变化影响。用户可在配置中指定 db_type 覆盖自动推断。
 //!
-//! # Doris 兼容性（1.10.0）
+//! # Doris 兼容性（1.10.x）
 //!
-//! Doris 走 MySQL 协议（FE 端口通常 9030），但 sqlx 默认的 sql_mode SET
-//! 初始化语句（`SET sql_mode = CONCAT(@@sql_mode, ...)`）Doris 解析器不接受，
-//! 因此 Doris 路径需通过 `MySqlConnectOptions` 显式关闭
-//! `no_engine_substitution` / `pipes_as_concat` 两个选项。
+//! Doris 走 MySQL 协议（FE 端口通常 9030），有两处协议差异必须在代码层规避：
+//! 1. **连接初始化 SET 语句**：sqlx 默认的 sql_mode SET 初始化语句
+//!    （`SET sql_mode = CONCAT(@@sql_mode, ...)`）Doris 解析器不接受，需通过
+//!    `MySqlConnectOptions` 显式关闭 `no_engine_substitution` / `pipes_as_concat`。
+//! 2. **prepared statement 协议不完整**：Doris 的 COM_STMT_PREPARE 响应
+//!    （PrepareOk）比 MySQL 短（10 字节 vs 12 字节），sqlx 绑定参数查询全部失败。
+//!    因此 Doris 路径所有 SQL 一律走**文本协议**（`sqlx::raw_sql`），
+//!    绑定值内联转义进 SQL 字面量，不依赖 prepared statement。
+//!
 //! 建表：DUPLICATE KEY 模型 + DISTRIBUTED BY HASH + 探测副本数；无自增主键。
 //! 写入：无事务（Doris 不支持），失败时可能残留部分行。
 
@@ -229,17 +234,33 @@ async fn ensure_table(
     cfg: &DatabaseConfig,
     mapped_cols: &[(&str, &str, &str, Option<&str>, &str)],
 ) -> Result<(), AppError> {
-    let table_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
-    )
-    .bind(&cfg.database)
-    .bind(&cfg.table)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| AppError::Database {
-        detail: format!("查询 information_schema 失败：{e}"),
-    })?
-        > 0;
+    // 表存在性检查：Doris 不支持 prepared statement，参数内联后走文本协议
+    let table_exists = if cfg.db_type == "doris" {
+        let sql = format!(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = '{}' AND table_name = '{}' LIMIT 1",
+            escape_mysql_string(&cfg.database),
+            escape_mysql_string(&cfg.table)
+        );
+        let exists = sqlx::raw_sql(&sql)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| AppError::Database {
+                detail: format!("查询 information_schema 失败：{e}"),
+            })?;
+        !exists.is_empty()
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+        )
+        .bind(&cfg.database)
+        .bind(&cfg.table)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Database {
+            detail: format!("查询 information_schema 失败：{e}"),
+        })?
+            > 0
+    };
 
     if !table_exists {
         info!("表 {}.{} 不存在，自动创建", cfg.database, cfg.table);
@@ -250,12 +271,22 @@ async fn ensure_table(
         } else {
             generate_create_ddl(cfg, mapped_cols)
         };
-        sqlx::query(&ddl)
-            .execute(pool)
-            .await
-            .map_err(|e| AppError::Database {
-                detail: format!("创建表 {table} 失败：{e}", table = cfg.table),
-            })?;
+        if cfg.db_type == "doris" {
+            // Doris：文本协议执行 DDL（prepared statement 协议不完整）
+            sqlx::raw_sql(&ddl)
+                .execute(pool)
+                .await
+                .map_err(|e| AppError::Database {
+                    detail: format!("创建表 {table} 失败：{e}", table = cfg.table),
+                })?;
+        } else {
+            sqlx::query(&ddl)
+                .execute(pool)
+                .await
+                .map_err(|e| AppError::Database {
+                    detail: format!("创建表 {table} 失败：{e}", table = cfg.table),
+                })?;
+        }
         info!("表 {}.{} 创建成功", cfg.database, cfg.table);
         return Ok(());
     }
@@ -360,20 +391,53 @@ async fn ensure_table(
 }
 
 /// 获取表的现有列名和类型。
+///
+/// Doris 不支持 prepared statement，参数内联后走文本协议（文本协议下
+/// 所有列按字符串解码，直接 `try_get::<Option<String>>` 读取）。
 async fn get_table_columns(
     pool: &Pool<MySql>,
     cfg: &DatabaseConfig,
 ) -> Result<HashMap<String, String>, AppError> {
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ORDINAL_POSITION")
-            .bind(&cfg.database)
-            .bind(&cfg.table)
+    if cfg.db_type == "doris" {
+        use sqlx::Row;
+        let sql = format!(
+            "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns WHERE table_schema = '{}' AND table_name = '{}' ORDER BY ORDINAL_POSITION",
+            escape_mysql_string(&cfg.database),
+            escape_mysql_string(&cfg.table)
+        );
+        let rows = sqlx::raw_sql(&sql)
             .fetch_all(pool)
             .await
             .map_err(|e| AppError::Database {
                 detail: format!("查询表结构失败：{e}"),
             })?;
-    Ok(rows.into_iter().collect())
+        let mut map = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let name = row
+                .try_get::<Option<String>, _>(0)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let data_type = row
+                .try_get::<Option<String>, _>(1)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            map.insert(name, data_type);
+        }
+        Ok(map)
+    } else {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ORDINAL_POSITION")
+                .bind(&cfg.database)
+                .bind(&cfg.table)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| AppError::Database {
+                    detail: format!("查询表结构失败：{e}"),
+                })?;
+        Ok(rows.into_iter().collect())
+    }
 }
 
 /// 转义 MySQL 字符串字面量中的特殊字符（用于 DDL COMMENT）。
@@ -390,7 +454,8 @@ fn escape_mysql_string(s: &str) -> String {
 /// 探测失败（Doris 版本不支持 prepared statement / SHOW BACKENDS 语法等）
 /// 时回退默认 1——保证单节点 Doris 也能建表成功，不阻断主流程。
 async fn probe_doris_replication(pool: &Pool<MySql>) -> u16 {
-    match sqlx::query("SHOW BACKENDS").fetch_all(pool).await {
+    // 文本协议：SHOW BACKENDS 是 Doris 专有命令，且 Doris 不支持 prepared statement
+    match sqlx::raw_sql("SHOW BACKENDS").fetch_all(pool).await {
         Ok(rows) => {
             let n = rows.len() as u16;
             let rep = n.clamp(1, 3);
@@ -577,9 +642,19 @@ async fn insert_records(
         .collect();
 
     if cfg.db_type == "doris" {
-        insert_without_tx(pool, &sql, &rows_values).await
+        // Doris：无事务 + 文本协议（绑定值内联转义进 SQL）
+        insert_without_tx(pool, &cfg.table, &db_names, &rows_values).await
     } else {
         insert_with_tx(pool, &sql, &rows_values).await
+    }
+}
+
+/// 将绑定值转为 SQL 字面量（Doris 文本协议路径用）。
+/// `None` → `NULL`；`Some` → 单引号包裹 + 转义（转义规则与 DDL COMMENT 一致）。
+fn sql_literal(v: &Option<String>) -> String {
+    match v {
+        Some(s) => format!("'{}'", escape_mysql_string(s)),
+        None => "NULL".to_string(),
     }
 }
 
@@ -667,17 +742,30 @@ async fn insert_with_tx(
 }
 
 /// 无事务版插入（Doris）：逐行独立提交，首错即停。
-/// Doris 不支持事务，部分行写入失败时无法回滚，可能残留部分行。
+/// Doris 不支持事务与 prepared statement，SQL 绑定值内联转义后走文本协议；
+/// 部分行写入失败时无法回滚，可能残留部分行。
 async fn insert_without_tx(
     pool: &Pool<MySql>,
-    sql: &str,
+    table: &str,
+    db_names: &[&str],
     rows_values: &[Vec<Option<String>>],
 ) -> Result<usize, AppError> {
+    let cols = db_names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut count = 0usize;
     let mut first_error: Option<String> = None;
     for (row_idx, values) in rows_values.iter().enumerate() {
-        match execute_insert(pool, sql, values).await {
-            Ok(()) => count += 1,
+        let vals = values
+            .iter()
+            .map(sql_literal)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("INSERT INTO `{table}` ({cols}) VALUES ({vals})");
+        match sqlx::raw_sql(&sql).execute(pool).await {
+            Ok(_) => count += 1,
             Err(e) => {
                 if first_error.is_none() {
                     first_error = Some(format!("{e}"));
@@ -770,6 +858,16 @@ mod tests {
         assert_eq!(infer_sql_type("source_name"), "VARCHAR(255) DEFAULT NULL");
         assert_eq!(infer_sql_type("host_ip"), "VARCHAR(255) DEFAULT NULL");
         assert_eq!(infer_sql_type("time_range"), "VARCHAR(64) DEFAULT NULL");
+    }
+
+    #[test]
+    fn sql_literal_formats_values_and_null() {
+        // Doris 文本协议：None → NULL，Some → 单引号 + 转义
+        assert_eq!(sql_literal(&None), "NULL");
+        assert_eq!(sql_literal(&Some("host1".into())), "'host1'");
+        assert_eq!(sql_literal(&Some("it's".into())), "'it''s'");
+        assert_eq!(sql_literal(&Some("a\nb".into())), "'a\\nb'");
+        assert_eq!(sql_literal(&Some("".into())), "''");
     }
 
     #[test]
