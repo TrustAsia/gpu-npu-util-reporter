@@ -167,30 +167,40 @@ pub struct ColumnMapping {
     pub comment: String,
 }
 
-/// MySQL 数据库推送配置。
+/// MySQL/Doris 数据库推送配置。
+///
+/// `db_type: mysql|doris` 选择目标引擎。Doris 走 MySQL 协议连接
+/// （FE 端口通常为 9030），建表 DDL、事务语义按引擎分支处理。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     /// 是否启用数据库推送。
     #[serde(default)]
     pub enabled: bool,
-    /// MySQL 主机地址。
+    /// 数据库引擎类型：`mysql`（默认）或 `doris`。
+    #[serde(default = "default_db_type")]
+    pub db_type: String,
+    /// 数据库主机地址（Doris 为 FE 地址）。
     pub host: String,
-    /// MySQL 端口（默认 3306）。
+    /// 数据库端口（MySQL 默认 3306；Doris FE 通常为 9030）。
     #[serde(default = "default_mysql_port")]
     pub port: u16,
-    /// MySQL 用户名。
+    /// 数据库用户名。
     pub username: String,
-    /// MySQL 密码。
+    /// 数据库密码。
     #[serde(default)]
     pub password: String,
-    /// MySQL 数据库名。
+    /// 数据库名。
     pub database: String,
     /// 目标表名。
     pub table: String,
     /// 列映射：本地字段名 → 数据库列名 + 类型 + 注释。
     /// 未在此列表中的本地字段不会写入数据库。
     pub columns: Vec<ColumnMapping>,
+}
+
+fn default_db_type() -> String {
+    "mysql".into()
 }
 
 fn default_mysql_port() -> u16 {
@@ -441,14 +451,32 @@ ownership:
 # enabled: false   — 设为 true 启用，false 则整个映射模块跳过不执行。
 #
 # ---- 匹配机制 ---------------------------------------------------------------
-# match_keys — 资产表中的列名（如 "IP地址"、"host_ip" 等）
-# record_key — CardRecord 中对应的字段名（可选）。
+# match_keys — 资产表中的匹配列名列表（多键 AND 组合，全部命中才注入）。
+#              兼容单字符串写法：match_keys: "host_ip"。
+# record_key — CardRecord 中对应的字段名列表（可选，与 match_keys 一一对应）。
 #              支持的字段：source_name, host_ip, node_name, card_id,
 #                         device_type, namespace, pod, container
 #              不指定时默认与 match_keys 相同。
 #
-#   示例 1：资产表用 "host_ip" 列 → match_keys: "host_ip" 即可
-#   示例 2：资产表用 "IP地址" 列 → match_keys: "IP地址", record_key: "host_ip"
+#   示例 1：资产表用 "host_ip" 列 → match_keys: ["host_ip"] 即可
+#   示例 2：资产表用 "IP地址" 列 → match_keys: ["IP地址"], record_key: ["host_ip"]
+#   示例 3：IP + 卡号联合匹配 → match_keys: ["IP地址", "卡号"], record_key: ["host_ip", "card_id"]
+#
+# ---- 匹配模式（可选，默认精确）-----------------------------------------------
+# match_mode      — exact（精确匹配，默认）或 regex（正则全值锚定匹配）。
+#                   正则按全值匹配（自动包裹 ^...$），不含通配符元字符
+#                   （*+?()[]{}^$|\）的模式按字面量精确匹配。
+# match_direction — 正则匹配方向，仅 match_mode: regex 时生效：
+#                   asset_pattern（默认）：资产表列值是模式，匹配记录值。
+#                                        如资产表 IP 列写 "10.0.1.*" 匹配该网段全部记录。
+#                   record_pattern：记录值是模式，匹配资产表列值（少见）。
+#
+# ---- 数据来源（可选，默认文件）-----------------------------------------------
+# source_type — file（默认，CSV/Excel）或 mysql。
+#   file：  使用 source_path（可选 source_sheet 指定 Excel 工作表名，
+#           不指定时默认读取第一个工作表）。
+#   mysql： 配置 host/port/username/password/database/table，程序自动执行
+#           SELECT * FROM `table` 拉取资产表（不手写 SQL），列顺序无关。
 #
 # ---- 列映射 -----------------------------------------------------------------
 # columns 定义从资产表提取哪些列，以及它们插入报表的位置和显示名称：
@@ -461,19 +489,35 @@ ownership:
 #     direction  — after（在锚点列之后）或 before（在锚点列之前）
 #     anchor     — 锚点列名（报表现有列名，如 "主机IP"、"设备类型"等）
 #
-# 支持多来源：可配置多个 MappingSource，每个引用独立的资产表文件。
-# source_sheet 可选：指定 Excel 工作表名；不指定时默认读取第一个工作表。
+# 支持多来源：可配置多个 MappingSource，每个引用独立的资产表。
 #
 mapping:
   enabled: false
   sources:
-    - source_path: "./assets.csv"
-      match_keys: "host_ip"
+    - source_type: file
+      source_path: "./assets.csv"
+      match_keys: ["host_ip"]
       columns:
         - source_field: "机房位置"
           rename: "机房"
           local_name: "room"
           position: { direction: after, anchor: "主机IP" }
+    # MySQL 资产来源示例（取消注释后按需修改）：
+    # - source_type: mysql
+    #   host: "10.0.0.10"
+    #   port: 3306
+    #   username: "read_only"
+    #   password: ""
+    #   database: "assets"
+    #   table: "asset_tbl"
+    #   match_keys: ["host_ip"]
+    #   match_mode: regex
+    #   match_direction: asset_pattern
+    #   columns:
+    #     - source_field: "room"
+    #       rename: "机房"
+    #       local_name: "room"
+    #       position: { direction: after, anchor: "主机IP" }
 
 # =============================================================================
 # 七、阈值染色触发器 — 在 Excel 中用背景色标记满足条件的单元格
@@ -674,6 +718,11 @@ report:
 #
 database:
   enabled: false
+  # 数据库引擎类型：mysql（默认）或 doris。
+  #   doris 时 host/port 填 Doris FE 地址（通常 port: 9030），走 MySQL 协议连接；
+  #   建表按 Doris 语法（DUPLICATE KEY 模型，无自增主键，自动探测副本数）。
+  #   注意：Doris 不支持事务，写入失败时可能残留部分行（MySQL 会整体回滚）。
+  db_type: "mysql"
   host: "127.0.0.1"
   port: 3306
   username: "reporter"
@@ -1077,22 +1126,108 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     return Err(AppError::Config {
                         path: path.into(),
                         reason: format!(
-                            "映射来源「{}」的 match_keys 不能为空字符串",
+                            "映射来源「{}」的 match_keys 不能为空列表",
                             src.source_path
                         ),
                     });
                 }
-                let card_record_field = src.record_key.as_deref().unwrap_or(&src.match_keys);
-                if !crate::mapper::KNOWN_CARD_RECORD_FIELDS.contains(&card_record_field) {
+                if let Some(key) = src.match_keys.iter().find(|k| k.is_empty()) {
                     return Err(AppError::Config {
                         path: path.into(),
                         reason: format!(
-                        "映射来源「{}」的 CardRecord 字段名「{}」不在已知字段列表中（支持：{}）",
-                        src.source_path,
-                        card_record_field,
-                        crate::mapper::KNOWN_CARD_RECORD_FIELDS.join(", ")
-                    ),
+                            "映射来源「{}」的 match_keys 不能包含空字符串（「{key}」为空）",
+                            src.source_path
+                        ),
                     });
+                }
+                // source_type 合法性
+                match src.source_type.as_str() {
+                    "file" | "mysql" => {}
+                    other => {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                                "映射来源「{}」的 source_type「{other}」不支持（仅支持 file / mysql）",
+                                src.source_path
+                            ),
+                        });
+                    }
+                }
+                // mysql 来源的必填连接字段
+                if src.source_type == "mysql" {
+                    for (field, val) in [
+                        ("host", src.host.as_deref().unwrap_or("")),
+                        ("username", src.username.as_deref().unwrap_or("")),
+                        ("database", src.database.as_deref().unwrap_or("")),
+                        ("table", src.table.as_deref().unwrap_or("")),
+                    ] {
+                        if val.is_empty() {
+                            return Err(AppError::Config {
+                                path: path.into(),
+                                reason: format!(
+                                    "映射来源「{}」source_type: mysql 缺少必填字段「{field}」",
+                                    src.source_path
+                                ),
+                            });
+                        }
+                    }
+                }
+                // match_mode / match_direction 合法性
+                match src.match_mode.as_str() {
+                    "exact" | "regex" => {}
+                    other => {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                                "映射来源「{}」的 match_mode「{other}」不支持（仅支持 exact / regex）",
+                                src.source_path
+                            ),
+                        });
+                    }
+                }
+                match src.match_direction.as_str() {
+                    "asset_pattern" | "record_pattern" => {}
+                    other => {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                                "映射来源「{}」的 match_direction「{other}」不支持（仅支持 asset_pattern / record_pattern）",
+                                src.source_path
+                            ),
+                        });
+                    }
+                }
+                // record_key 与 match_keys 数量一致（多键一一对应）
+                if !src.record_key.is_empty() && src.record_key.len() != src.match_keys.len() {
+                    return Err(AppError::Config {
+                        path: path.into(),
+                        reason: format!(
+                            "映射来源「{}」的 record_key（{} 个）与 match_keys（{} 个）数量不一致，多键匹配时二者必须一一对应",
+                            src.source_path,
+                            src.record_key.len(),
+                            src.match_keys.len()
+                        ),
+                    });
+                }
+                // CardRecord 字段名合法性：使用 record_key（有值时）或 match_keys
+                let card_record_fields: &[String] = if src.record_key.is_empty() {
+                    &src.match_keys
+                } else {
+                    &src.record_key
+                };
+                for card_record_field in card_record_fields {
+                    if !crate::mapper::KNOWN_CARD_RECORD_FIELDS.contains(&card_record_field.as_str())
+                    {
+                        return Err(AppError::Config {
+                            path: path.into(),
+                            reason: format!(
+                            "映射来源「{}」的 CardRecord 字段名「{}」不在已知字段列表中（支持：{}）",
+                            src.source_path,
+                            card_record_field,
+                            crate::mapper::KNOWN_CARD_RECORD_FIELDS.join(", ")
+                        ),
+                        });
+                    }
                 }
                 // 校验映射列关键字段非空
                 for col in &src.columns {
@@ -1151,6 +1286,15 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
     // 校验数据库配置
     if let Some(db) = &cfg.database {
         if db.enabled {
+            if !matches!(db.db_type.as_str(), "mysql" | "doris") {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "database.db_type「{}」不支持（仅支持 mysql / doris）",
+                        db.db_type
+                    ),
+                });
+            }
             if db.host.is_empty() {
                 return Err(AppError::Config {
                     path: path.into(),
@@ -1837,9 +1981,7 @@ mod tests {
             enabled: true,
             sources: vec![MappingSource {
                 source_path: "test.csv".into(),
-                source_sheet: None,
-                match_keys: "host_ip".into(),
-                record_key: None,
+                match_keys: vec!["host_ip".into()],
                 columns: vec![MappingColumn {
                     source_field: String::new(), // 空
                     rename: "机房".into(),
@@ -1849,6 +1991,7 @@ mod tests {
                         anchor: "主机IP".into(),
                     },
                 }],
+                ..MappingSource::default()
             }],
         });
         let r = validate_config(&cfg, "test.yaml");
@@ -1920,10 +2063,10 @@ mod tests {
             enabled: true,
             sources: vec![crate::mapper::MappingSource {
                 source_path: "assets.csv".into(),
-                source_sheet: None,
-                match_keys: "IP地址".into(),
-                record_key: Some("unknown_field".into()),
+                match_keys: vec!["IP地址".into()],
+                record_key: vec!["unknown_field".into()],
                 columns: vec![],
+                ..crate::mapper::MappingSource::default()
             }],
         });
         let r = validate_config(&cfg, "test.yaml");
@@ -1933,16 +2076,89 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_mapping_with_invalid_match_mode() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                match_keys: vec!["host_ip".into()],
+                match_mode: "fuzzy".into(),
+                columns: vec![],
+                ..crate::mapper::MappingSource::default()
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法 match_mode 应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("fuzzy"));
+    }
+
+    #[test]
+    fn config_rejects_mapping_with_invalid_match_direction() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                match_keys: vec!["host_ip".into()],
+                match_mode: "regex".into(),
+                match_direction: "both".into(),
+                columns: vec![],
+                ..crate::mapper::MappingSource::default()
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法 match_direction 应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("both"));
+    }
+
+    #[test]
+    fn config_rejects_mysql_source_missing_required_fields() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                source_type: "mysql".into(),
+                match_keys: vec!["host_ip".into()],
+                columns: vec![],
+                ..crate::mapper::MappingSource::default()
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "mysql 来源缺少必填字段应被拒绝");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("host"), "错误信息应指出缺失字段 host：{msg}");
+    }
+
+    #[test]
+    fn config_rejects_record_key_length_mismatch() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.mapping = Some(crate::mapper::MappingConfig {
+            enabled: true,
+            sources: vec![crate::mapper::MappingSource {
+                source_path: "assets.csv".into(),
+                match_keys: vec!["host_ip".into(), "card_id".into()],
+                record_key: vec!["host_ip".into()],
+                columns: vec![],
+                ..crate::mapper::MappingSource::default()
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "record_key 与 match_keys 数量不一致应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("数量不一致"));
+    }
+
+    #[test]
     fn config_rejects_mapping_with_empty_match_keys() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.mapping = Some(crate::mapper::MappingConfig {
             enabled: true,
             sources: vec![crate::mapper::MappingSource {
                 source_path: "assets.csv".into(),
-                source_sheet: None,
-                match_keys: String::new(),
-                record_key: None,
+                match_keys: Vec::new(),
                 columns: vec![],
+                ..crate::mapper::MappingSource::default()
             }],
         });
         let r = validate_config(&cfg, "test.yaml");
@@ -1956,10 +2172,10 @@ mod tests {
             enabled: true,
             sources: vec![crate::mapper::MappingSource {
                 source_path: "assets.csv".into(),
-                source_sheet: None,
-                match_keys: "IP地址".into(),
-                record_key: Some("host_ip".into()),
+                match_keys: vec!["IP地址".into()],
+                record_key: vec!["host_ip".into()],
                 columns: vec![],
+                ..crate::mapper::MappingSource::default()
             }],
         });
         assert!(
@@ -2036,6 +2252,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2049,10 +2266,58 @@ mod tests {
     }
 
     #[test]
+    fn database_config_rejects_invalid_db_type() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            db_type: "oracle".into(),
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "host_ip".into(),
+                db_name: "host_ip".into(),
+                db_type: None,
+                comment: "IP".into(),
+            }],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法 db_type 应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("oracle"));
+    }
+
+    #[test]
+    fn database_config_accepts_doris_db_type() {
+        // db_type: doris 应通过校验（连接/DDL 差异在 db.rs 运行时处理）
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            db_type: "doris".into(),
+            host: "doris-fe".into(),
+            port: 9030,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![ColumnMapping {
+                local_name: "host_ip".into(),
+                db_name: "host_ip".into(),
+                db_type: None,
+                comment: "IP".into(),
+            }],
+        });
+        assert!(validate_config(&cfg, "test.yaml").is_ok(), "doris db_type 应通过校验");
+    }
+
+    #[test]
     fn database_config_rejects_duplicate_db_names() {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2083,6 +2348,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2105,6 +2371,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2127,6 +2394,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2149,6 +2417,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2173,15 +2442,14 @@ mod tests {
             enabled: true,
             sources: vec![crate::mapper::MappingSource {
                 source_path: "assets.csv".into(),
-                source_sheet: None,
-                match_keys: "host_ip".into(),
-                record_key: None,
+                match_keys: vec!["host_ip".into()],
                 columns: vec![crate::mapper::MappingColumn {
                     source_field: "custom".into(),
                     rename: "主机IP".into(), // 与基础列显示名冲突
                     local_name: None,
                     position: crate::mapper::InsertPosition::after("节点名称"),
                 }],
+                ..crate::mapper::MappingSource::default()
             }],
         });
         let r = validate_config(&cfg, "test.yaml");
@@ -2195,6 +2463,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2219,6 +2488,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2244,6 +2514,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -2267,6 +2538,7 @@ mod tests {
         let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
         cfg.database = Some(DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),

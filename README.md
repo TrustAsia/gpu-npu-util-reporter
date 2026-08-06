@@ -22,7 +22,8 @@
 
 - **多源顺序采集**：多个 Prometheus 源逐个查询，单个源 / 单卡失败降级为 N/A，不中断整体。
 - **时间范围聚合**：均值、峰值、峰值出现时间；并列峰值取最早时间戳（稳定）。
-- **资产映射**：加载外部 CSV / Excel 资产表，按 `host_ip` / `card_id` 等键 join，把机房位置、负责人等字段**注入到指定基础列的前 / 后**（锚点必须为基础列）。
+- **资产映射**：从 CSV / Excel / MySQL 资产表加载，按 `host_ip` / `card_id` 等键 join（支持**多键 AND 组合**与**正则全值匹配**，正则方向可选：资产侧模式匹配记录 / 记录侧模式匹配资产），把机房位置、负责人等字段**注入到指定基础列的前 / 后**（锚点必须为基础列）。
+- **数据库推送**：采集结果可写入 **MySQL 或 Doris**（`db_type` 二选一）。自动建表（Doris 走 DUPLICATE KEY 模型 + 自动探测副本数）、schema 校验（缺列生成 DDL 文件退出 / 多余列交互询问）、事务写入（MySQL 全有或全无；Doris 不支持事务、失败可能残留部分行）。
 - **阈值染色（PRD §2.6）**：8 个可独立启用的触发器（核心 / 显存 × 均值 / 峰值 × 高于 / 低于），命中单元格按触发器各自配置的 **HEX 颜色**填充，便于一眼定位过载（红）/ 闲置（橙）。默认全部关闭。
 - **健壮的中文错误提示**：致命错误打印中文上下文并退出码 1；非致命警告收集后正常出报表、对应单元格 N/A、退出码 0；全程不 panic。
 - **结构化日志**：基于 `tracing`，控制台与文件日志可分别指定级别（trace/debug/info/warn/error），文件日志可独立开关，路径支持模板变量。
@@ -116,14 +117,49 @@ ownership:
 mapping:
   enabled: false
   sources:
-    - source_path: "./assets.csv"
-      match_keys: "host_ip"          # 资产表中的匹配列名
-      # record_key: "host_ip"        # 可选，CardRecord 侧字段名（默认与 match_keys 相同）
+    - source_type: file              # file（CSV/Excel，默认）或 mysql
+      source_path: "./assets.csv"
+      match_keys: ["host_ip"]        # 匹配列名列表，多键 AND；兼容单字符串写法
+      # record_key: ["host_ip"]      # 可选，CardRecord 侧字段名（默认与 match_keys 相同）
+      # match_mode: regex            # 可选，exact（默认）或 regex（正则全值锚定匹配）
+      # match_direction: asset_pattern  # 可选，asset_pattern（默认）或 record_pattern
       # source_sheet: "Sheet1"       # 可选，Excel 工作表名
       columns:
         - source_field: "机房位置"
           rename: "机房"
           position: { direction: after, anchor: "主机IP" }   # 锚点必须为基础列
+    # MySQL 资产来源示例（source_type: mysql 时配置连接 + table，自动 SELECT *，不手写 SQL）：
+    # - source_type: mysql
+    #   host: "10.0.0.10"
+    #   port: 3306
+    #   username: "read_only"
+    #   password: ""
+    #   database: "assets"
+    #   table: "asset_tbl"
+    #   match_keys: ["host_ip"]
+    #   match_mode: regex            # 如资产表 IP 列写 "10.0.1.*" 匹配整个网段
+    #   columns:
+    #     - source_field: "room"
+    #       rename: "机房"
+    #       position: { direction: after, anchor: "主机IP" }
+
+# 数据库推送（可选）。db_type: mysql（默认）或 doris（Doris 走 MySQL 协议，port 填 FE 端口如 9030）：
+#   Doris 建表自动使用 DUPLICATE KEY 模型（无自增主键）、自动探测副本数；
+#   Doris 不支持事务，写入失败时可能残留部分行（MySQL 会整体回滚）。
+# database:
+#   enabled: false
+#   db_type: "mysql"
+#   host: "127.0.0.1"
+#   port: 3306
+#   username: "reporter"
+#   password: ""
+#   database: "gpu_npu_monitor"
+#   table: "utilization"
+#   columns:
+#     - local_name: "host_ip"      # 本地字段名（报表列的稳定标识符）
+#       db_name: "host_ip"         # 数据库列名
+#       db_type: "VARCHAR(255) DEFAULT NULL"  # 可选，不填按 local_name 自动推断
+#       comment: "主机IP地址"
 
 # 8 个阈值触发器，默认全为 null（关闭）。启用示例：
 #   core_avg_above:

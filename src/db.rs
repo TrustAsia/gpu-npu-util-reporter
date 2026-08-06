@@ -1,17 +1,27 @@
-//! MySQL 数据库推送模块。
+//! MySQL/Doris 数据库推送模块。
 //!
-//! 职责：根据配置将采集结果写入 MySQL 表，包含：
-//! - 自动建表（含列注释）
+//! 职责：根据配置将采集结果写入 MySQL 或 Doris 表，包含：
+//! - 自动建表（含列注释；MySQL 与 Doris 的 DDL 按 `db_type` 分支生成）
 //! - schema 校验（缺列→生成DDL退出；多余列→询问用户）
-//! - 逐行 INSERT
+//! - 逐行 INSERT（MySQL 事务全有或全无；Doris 不支持事务，逐行提交）
 //!
 //! 列映射通过本地字段名（local_name）而非报表显示名进行，
 //! 确保映射不受显示名变化影响。用户可在配置中指定 db_type 覆盖自动推断。
+//!
+//! # Doris 兼容性（1.10.0）
+//!
+//! Doris 走 MySQL 协议（FE 端口通常 9030），但 sqlx 默认的 sql_mode SET
+//! 初始化语句（`SET sql_mode = CONCAT(@@sql_mode, ...)`）Doris 解析器不接受，
+//! 因此 Doris 路径需通过 `MySqlConnectOptions` 显式关闭
+//! `no_engine_substitution` / `pipes_as_concat` 两个选项。
+//! 建表：DUPLICATE KEY 模型 + DISTRIBUTED BY HASH + 探测副本数；无自增主键。
+//! 写入：无事务（Doris 不支持），失败时可能残留部分行。
 
 use crate::config::DatabaseConfig;
 use crate::error::AppError;
 use crate::processor::CardRecord;
 use chrono_tz::Tz;
+use sqlx::mysql::MySqlConnectOptions;
 use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
 use tracing::{error, info, warn};
@@ -108,18 +118,42 @@ pub async fn push_to_database(
     }
 
     // 连接数据库（30 秒连接超时，防止不可达时无限挂起）
+    // Doris 走 MySQL 协议，但必须关闭 sqlx 的 sql_mode SET 初始化语句：
+    // no_engine_substitution / pipes_as_concat 默认发送
+    // `SET sql_mode = CONCAT(@@sql_mode, ...)`，Doris 解析器不支持非常量表达式，
+    // 会以 "Set statement does't support non-constant expr" 拒绝连接。
     let url = build_mysql_url(cfg);
-    info!("连接 MySQL：{}:{}", cfg.host, cfg.port);
-    let pool = sqlx::pool::PoolOptions::<MySql>::new()
-        .acquire_timeout(std::time::Duration::from_secs(30))
-        .connect(&url)
-        .await
-        .map_err(|e| AppError::Database {
-            detail: format!(
-                "无法连接 MySQL {}:{} 数据库「{}」：{e}",
-                cfg.host, cfg.port, cfg.database
-            ),
-        })?;
+    info!("连接 {}：{}:{}", cfg.db_type, cfg.host, cfg.port);
+    let pool = if cfg.db_type == "doris" {
+        let opts = url
+            .parse::<MySqlConnectOptions>()
+            .map_err(|e| AppError::Database {
+                detail: format!("解析连接 URL 失败：{e}"),
+            })?
+            .no_engine_substitution(false)
+            .pipes_as_concat(false);
+        sqlx::pool::PoolOptions::<MySql>::new()
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .connect_with(opts)
+            .await
+            .map_err(|e| AppError::Database {
+                detail: format!(
+                    "无法连接 Doris {}:{} 数据库「{}」：{e}",
+                    cfg.host, cfg.port, cfg.database
+                ),
+            })?
+    } else {
+        sqlx::pool::PoolOptions::<MySql>::new()
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .connect(&url)
+            .await
+            .map_err(|e| AppError::Database {
+                detail: format!(
+                    "无法连接 MySQL {}:{} 数据库「{}」：{e}",
+                    cfg.host, cfg.port, cfg.database
+                ),
+            })?
+    };
 
     let result = async {
         // 检查/创建表
@@ -158,7 +192,8 @@ fn build_mysql_url(cfg: &DatabaseConfig) -> String {
 }
 
 /// 对 MySQL URL 中的用户名/密码做百分号编码（防特殊字符导致连接失败）。
-fn percent_encode(s: &str) -> String {
+/// `pub(crate)` 供 mapper.rs 的 MySQL 资产来源复用。
+pub(crate) fn percent_encode(s: &str) -> String {
     s.chars()
         .flat_map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
@@ -208,7 +243,13 @@ async fn ensure_table(
 
     if !table_exists {
         info!("表 {}.{} 不存在，自动创建", cfg.database, cfg.table);
-        let ddl = generate_create_ddl(cfg, mapped_cols);
+        let ddl = if cfg.db_type == "doris" {
+            // 建表前探测 BE 数量决定副本数（单节点 Doris 也能建表成功）
+            let replication = probe_doris_replication(pool).await;
+            generate_doris_create_ddl(cfg, mapped_cols, replication)
+        } else {
+            generate_create_ddl(cfg, mapped_cols)
+        };
         sqlx::query(&ddl)
             .execute(pool)
             .await
@@ -344,6 +385,72 @@ fn escape_mysql_string(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
+/// 探测 Doris BE 数量，决定建表副本数（`min(3, BE数)`，至少 1）。
+///
+/// 探测失败（Doris 版本不支持 prepared statement / SHOW BACKENDS 语法等）
+/// 时回退默认 1——保证单节点 Doris 也能建表成功，不阻断主流程。
+async fn probe_doris_replication(pool: &Pool<MySql>) -> u16 {
+    match sqlx::query("SHOW BACKENDS").fetch_all(pool).await {
+        Ok(rows) => {
+            let n = rows.len() as u16;
+            let rep = n.clamp(1, 3);
+            info!("Doris BE 数量：{n}，建表 replication_num 取 {rep}");
+            rep
+        }
+        Err(e) => {
+            warn!("SHOW BACKENDS 探测 BE 数量失败，使用默认副本数 1：{e}");
+            1
+        }
+    }
+}
+
+/// 生成 Doris CREATE TABLE DDL（DUPLICATE KEY 模型）。
+///
+/// 与 MySQL DDL 的差异：
+/// - 无自增 `id` 主键（Doris 仅 UNIQUE KEY 模型 2.1+ 支持 AUTO_INCREMENT；
+///   报表为追加式历史数据，不需要主键）
+/// - 无 `ENGINE=InnoDB` / CHARSET 子句（Doris 固定 OLAP 引擎）
+/// - 必须指定 key 模型与分桶：`DUPLICATE KEY(hash_col)` +
+///   `DISTRIBUTED BY HASH(hash_col) BUCKETS 10`
+/// - 副本数由 [`probe_doris_replication`] 探测决定
+///
+/// hash 列优先取 `host_ip`（若在映射列中），否则取第一个映射列；
+/// Doris 要求 key 列位于列定义最前，因此 hash 列会被移到第一位
+/// （列顺序不影响 INSERT，INSERT 按列名定位）。
+fn generate_doris_create_ddl(
+    cfg: &DatabaseConfig,
+    mapped_cols: &[(&str, &str, &str, Option<&str>, &str)],
+    replication: u16,
+) -> String {
+    let hash_col = mapped_cols
+        .iter()
+        .find(|(_, _, db, _, _)| *db == "host_ip")
+        .map(|c| c.2)
+        .unwrap_or_else(|| mapped_cols[0].2);
+    // 把 hash 列移到列定义第一位（Doris 要求 key 列在最前）
+    let hash_entry = mapped_cols
+        .iter()
+        .copied()
+        .find(|c| c.2 == hash_col)
+        .expect("hash_col 必在 mapped_cols 中");
+    let ordered: Vec<(&str, &str, &str, Option<&str>, &str)> = std::iter::once(hash_entry)
+        .chain(mapped_cols.iter().copied().filter(|c| c.2 != hash_col))
+        .collect();
+    let mut lines = Vec::new();
+    for (_display_name, local_name, db_name, db_type, comment) in &ordered {
+        let sql_type = db_type.unwrap_or_else(|| infer_sql_type(local_name));
+        let comment_escaped = escape_mysql_string(comment);
+        lines.push(format!(
+            "  `{db_name}` {sql_type} COMMENT '{comment_escaped}'"
+        ));
+    }
+    format!(
+        "CREATE TABLE `{table}` (\n{cols}\n) DUPLICATE KEY(`{hash_col}`)\nDISTRIBUTED BY HASH(`{hash_col}`) BUCKETS 10\nPROPERTIES (\"replication_num\" = \"{replication}\");",
+        table = cfg.table,
+        cols = lines.join(",\n")
+    )
+}
+
 /// 生成 CREATE TABLE DDL。
 fn generate_create_ddl(cfg: &DatabaseConfig, mapped_cols: &[(&str, &str, &str, Option<&str>, &str)]) -> String {
     let mut lines = Vec::new();
@@ -419,6 +526,9 @@ fn infer_sql_type(local_name: &str) -> &'static str {
 }
 
 /// 逐行 INSERT 记录到数据库。
+///
+/// MySQL：事务包装（全有或全无，失败整体回滚）。
+/// Doris：不支持事务，逐行独立提交（失败时可能残留部分行，见模块文档）。
 async fn insert_records(
     pool: &Pool<MySql>,
     cfg: &DatabaseConfig,
@@ -444,6 +554,60 @@ async fn insert_records(
         vals = placeholders.join(", ")
     );
 
+    // 先构建所有行的值（两种引擎共用），再按引擎选择插入策略
+    let rows_values: Vec<Vec<Option<String>>> = records
+        .iter()
+        .enumerate()
+        .map(|(row_idx, rec)| {
+            mapped_cols
+                .iter()
+                .map(
+                    |(display_name, _local_name, _db_name, _db_type, _comment)| {
+                        crate::reporter::cell_value_for_db(
+                            rec,
+                            display_name,
+                            &mapping_borrowed,
+                            row_idx,
+                            tz,
+                        )
+                    },
+                )
+                .collect()
+        })
+        .collect();
+
+    if cfg.db_type == "doris" {
+        insert_without_tx(pool, &sql, &rows_values).await
+    } else {
+        insert_with_tx(pool, &sql, &rows_values).await
+    }
+}
+
+/// 执行单行 INSERT（绑定参数）；executor 兼容连接池与事务。
+async fn execute_insert<'e, E>(
+    executor: E,
+    sql: &str,
+    values: &[Option<String>],
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = MySql>,
+{
+    let mut query = sqlx::query(sql);
+    for val in values {
+        match val {
+            Some(v) => query = query.bind(v),
+            None => query = query.bind(None::<String>),
+        }
+    }
+    query.execute(executor).await.map(|_| ())
+}
+
+/// 事务版插入（MySQL）：全部成功才提交，部分失败整体回滚。
+async fn insert_with_tx(
+    pool: &Pool<MySql>,
+    sql: &str,
+    rows_values: &[Vec<Option<String>>],
+) -> Result<usize, AppError> {
     // 开启事务，确保所有 INSERT 原子提交或整体回滚，避免部分写入留下不完整数据
     let mut tx = pool.begin().await.map_err(|e| AppError::Database {
         detail: format!("开启事务失败：{e}"),
@@ -451,25 +615,9 @@ async fn insert_records(
 
     let mut count = 0usize;
     let mut first_error: Option<String> = None;
-    for (row_idx, rec) in records.iter().enumerate() {
-        // 构建该行的值（按 mapped_cols 顺序，使用 display_name 取值）
-        let values: Vec<Option<String>> = mapped_cols
-            .iter()
-            .map(|(display_name, _local_name, _db_name, _db_type, _comment)| {
-                crate::reporter::cell_value_for_db(rec, display_name, &mapping_borrowed, row_idx, tz)
-            })
-            .collect();
-
-        // 执行 INSERT
-        let mut query = sqlx::query(&sql);
-        for val in &values {
-            match val {
-                Some(v) => query = query.bind(v),
-                None => query = query.bind(None::<String>),
-            }
-        }
-        match query.execute(&mut *tx).await {
-            Ok(_) => count += 1,
+    for (row_idx, values) in rows_values.iter().enumerate() {
+        match execute_insert(&mut *tx, sql, values).await {
+            Ok(()) => count += 1,
             Err(e) => {
                 if first_error.is_none() {
                     first_error = Some(format!("{e}"));
@@ -489,21 +637,21 @@ async fn insert_records(
         return Err(AppError::Database {
             detail: format!(
                 "所有 {total} 行写入均失败，首条错误：{e}",
-                total = records.len(),
+                total = rows_values.len(),
                 e = first_error.expect("at least one error when count==0")
             ),
         });
     }
-    if count < records.len() {
+    if count < rows_values.len() {
         warn!(
             "部分行写入失败：{count}/{} 行成功，回滚事务以保证数据一致性",
-            records.len()
+            rows_values.len()
         );
         let rollback_ok = tx.rollback().await.is_ok();
         return Err(AppError::Database {
             detail: format!(
                 "部分行写入失败（{count}/{} 成功），{}首条错误：{e}",
-                records.len(),
+                rows_values.len(),
                 if rollback_ok { "已回滚事务，" } else { "回滚事务失败，数据可能不一致，" },
                 e = first_error.expect("first_error set when count < records.len()")
             ),
@@ -514,6 +662,55 @@ async fn insert_records(
     tx.commit().await.map_err(|e| AppError::Database {
         detail: format!("提交事务失败：{e}"),
     })?;
+
+    Ok(count)
+}
+
+/// 无事务版插入（Doris）：逐行独立提交，首错即停。
+/// Doris 不支持事务，部分行写入失败时无法回滚，可能残留部分行。
+async fn insert_without_tx(
+    pool: &Pool<MySql>,
+    sql: &str,
+    rows_values: &[Vec<Option<String>>],
+) -> Result<usize, AppError> {
+    let mut count = 0usize;
+    let mut first_error: Option<String> = None;
+    for (row_idx, values) in rows_values.iter().enumerate() {
+        match execute_insert(pool, sql, values).await {
+            Ok(()) => count += 1,
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(format!("{e}"));
+                }
+                warn!("写入第 {} 行失败：{e}", row_idx + 1);
+                // 首次失败后立即跳出循环，避免浪费数据库往返
+                break;
+            }
+        }
+    }
+
+    if count == 0 {
+        return Err(AppError::Database {
+            detail: format!(
+                "所有 {total} 行写入均失败，首条错误：{e}",
+                total = rows_values.len(),
+                e = first_error.expect("at least one error when count==0")
+            ),
+        });
+    }
+    if count < rows_values.len() {
+        warn!(
+            "部分行写入失败：{count}/{} 行成功（Doris 不支持事务，可能残留部分行）",
+            rows_values.len()
+        );
+        return Err(AppError::Database {
+            detail: format!(
+                "部分行写入失败（{count}/{} 成功，Doris 无事务无法回滚，可能残留部分行），首条错误：{e}",
+                rows_values.len(),
+                e = first_error.expect("first_error set when count < rows_values.len()")
+            ),
+        });
+    }
 
     Ok(count)
 }
@@ -589,6 +786,7 @@ mod tests {
     fn generate_create_ddl_format() {
         let cfg = DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -614,6 +812,7 @@ mod tests {
     fn generate_create_ddl_with_custom_type() {
         let cfg = DatabaseConfig {
             enabled: true,
+            db_type: "mysql".into(),
             host: "localhost".into(),
             port: 3306,
             username: "root".into(),
@@ -627,5 +826,81 @@ mod tests {
         ];
         let ddl = generate_create_ddl(&cfg, &cols);
         assert!(ddl.contains("`time_range` VARCHAR(128) DEFAULT NULL"));
+    }
+
+    #[test]
+    fn generate_doris_create_ddl_format() {
+        let cfg = DatabaseConfig {
+            enabled: true,
+            db_type: "doris".into(),
+            host: "doris-fe".into(),
+            port: 9030,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "gpu_util".into(),
+            columns: vec![],
+        };
+        let cols = vec![
+            ("数据来源", "source_name", "source_name", None, "数据来源"),
+            ("主机IP", "host_ip", "host_ip", None, "主机IP地址"),
+            ("核心利用率平均值", "core_avg", "core_avg", None, "核心利用率平均值"),
+        ];
+        let ddl = generate_doris_create_ddl(&cfg, &cols, 1);
+        assert!(ddl.starts_with("CREATE TABLE `gpu_util`"));
+        // Doris 专属要素
+        assert!(ddl.contains("DUPLICATE KEY(`host_ip`)"));
+        assert!(ddl.contains("DISTRIBUTED BY HASH(`host_ip`) BUCKETS 10"));
+        assert!(ddl.contains("PROPERTIES (\"replication_num\" = \"1\")"));
+        // 不得出现 MySQL 专属要素
+        assert!(!ddl.contains("AUTO_INCREMENT"), "Doris DDL 不应含自增主键");
+        assert!(!ddl.contains("ENGINE="), "Doris DDL 不应含 ENGINE 子句");
+        assert!(!ddl.contains("`id`"), "Doris DDL 不应含 id 自增列");
+        // hash 列（host_ip）被移到列定义第一位（Doris 要求 key 列在最前）
+        let host_ip_pos = ddl.find("`host_ip`").unwrap();
+        let source_pos = ddl.find("`source_name`").unwrap();
+        assert!(
+            host_ip_pos < source_pos,
+            "hash 列 host_ip 应在列定义最前：{ddl}"
+        );
+        // 列类型与注释保持与 MySQL 一致
+        assert!(ddl.contains("`core_avg` DOUBLE"));
+        assert!(ddl.contains("COMMENT '主机IP地址'"));
+    }
+
+    #[test]
+    fn generate_doris_create_ddl_replication_cap_and_fallback_hash_col() {
+        let cfg = DatabaseConfig {
+            enabled: true,
+            db_type: "doris".into(),
+            host: "doris-fe".into(),
+            port: 9030,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "t".into(),
+            columns: vec![],
+        };
+        // 副本数传 3 时使用 3
+        let cols = vec![("主机IP", "host_ip", "host_ip", None, "x")];
+        let ddl = generate_doris_create_ddl(&cfg, &cols, 3);
+        assert!(ddl.contains("replication_num\" = \"3\""), "副本数 3：{ddl}");
+        // 映射列中没有 host_ip → hash 列回退到第一个映射列
+        let cols_no_ip = vec![
+            ("设备类型", "device_type", "device_type", None, "x"),
+            ("节点名称", "node_name", "node_name", None, "x"),
+        ];
+        let ddl = generate_doris_create_ddl(&cfg, &cols_no_ip, 1);
+        assert!(
+            ddl.contains("DUPLICATE KEY(`device_type`)"),
+            "hash 列应回退到首列：{ddl}"
+        );
+        assert!(ddl.contains("DISTRIBUTED BY HASH(`device_type`)"));
+        // 首列本身已在最前：列定义 + DUPLICATE KEY + DISTRIBUTED BY HASH 各一次
+        assert_eq!(
+            ddl.matches("`device_type`").count(),
+            3,
+            "仅列定义与两个 key 子句出现：{ddl}"
+        );
     }
 }

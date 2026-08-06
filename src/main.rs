@@ -40,6 +40,19 @@ struct Args {
     output: Option<String>,
 }
 
+/// 映射来源的描述（日志用）：file 显示文件路径，mysql 显示连接目标。
+fn src_desc(src: &mapper::MappingSource) -> String {
+    match src.source_type.as_str() {
+        "mysql" => format!(
+            "mysql://{}:{}/{}",
+            src.host.as_deref().unwrap_or("?"),
+            src.port.unwrap_or(3306),
+            src.table.as_deref().unwrap_or("?")
+        ),
+        _ => src.source_path.clone(),
+    }
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
@@ -216,41 +229,69 @@ async fn main() -> ExitCode {
             .then(a.card_id.cmp(&b.card_id))
     });
 
-    // 7. 资产映射（可选，支持多来源）
+    // 7. 资产映射（可选，支持多来源：文件/MySQL）
     info!("开始资产映射");
     let mut mapping_values: HashMap<(usize, String), String> = HashMap::new();
     let mapping_columns: Vec<mapper::MappingColumn> = if let Some(m) = &cfg.mapping {
         if m.enabled {
             let all_cols = m.all_columns_owned();
             for src in &m.sources {
-                info!("加载资产表：{}", src.source_path);
-                match mapper::load_asset_table(
-                    &src.source_path,
-                    &src.match_keys,
-                    src.source_sheet.as_deref(),
-                ) {
-                    Ok(assets) => {
-                        info!("资产表加载完成：{} 行", assets.len());
-                        let (index, dup_warnings) = mapper::build_asset_index(&assets);
-                        for w in &dup_warnings {
-                            warn!("{w}");
-                        }
-                        warnings.extend(dup_warnings);
-                        let mut joined_count = 0usize;
-                        for (i, rec) in records.iter().enumerate() {
-                            let joined = mapper::join_record(rec, &index, src);
-                            if !joined.is_empty() {
-                                joined_count += 1;
-                            }
-                            for (rename, val) in joined {
-                                mapping_values.insert((i, rename), val);
-                            }
-                        }
+                // 按来源类型加载资产表：file 同步读文件，mysql 走 SELECT * 查询
+                let assets = match src.source_type.as_str() {
+                    "file" => {
+                        info!("加载资产表（文件）：{}", src.source_path);
+                        mapper::load_asset_table(src)
+                    }
+                    "mysql" => {
                         info!(
-                            "资产映射完成（{}）：{joined_count}/{} 行命中",
-                            src.source_path,
-                            records.len()
+                            "加载资产表（MySQL）：{}:{}/{}",
+                            src.host.as_deref().unwrap_or("?"),
+                            src.port.unwrap_or(3306),
+                            src.table.as_deref().unwrap_or("?")
                         );
+                        mapper::load_asset_table_mysql(src).await
+                    }
+                    other => Err(AppError::Mapping {
+                        path: src.source_path.clone(),
+                        detail: format!(
+                            "不支持的 source_type「{other}」（仅支持 file / mysql）"
+                        ),
+                    }),
+                };
+                match assets {
+                    Ok(asset_rows) => {
+                        info!("资产表加载完成：{} 行", asset_rows.len());
+                        match mapper::build_asset_index(&asset_rows, src) {
+                            Ok((index, dup_warnings)) => {
+                                for w in &dup_warnings {
+                                    warn!("{w}");
+                                }
+                                warnings.extend(dup_warnings);
+                                let mut joined_count = 0usize;
+                                for (i, rec) in records.iter().enumerate() {
+                                    let joined = mapper::join_record(rec, &index);
+                                    if !joined.values.is_empty() {
+                                        joined_count += 1;
+                                    }
+                                    for w in &joined.warnings {
+                                        warn!("{w}");
+                                    }
+                                    warnings.extend(joined.warnings);
+                                    for (rename, val) in joined.values {
+                                        mapping_values.insert((i, rename), val);
+                                    }
+                                }
+                                info!(
+                                    "资产映射完成（{}）：{joined_count}/{} 行命中",
+                                    src_desc(src),
+                                    records.len()
+                                );
+                            }
+                            Err(e) => {
+                                warn!("{e}");
+                                warnings.push(format!("{e}"));
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!("{e}");
@@ -315,7 +356,7 @@ async fn main() -> ExitCode {
     // 9. 数据库推送（可选，失败不阻断——Excel 报表已生成）
     if let Some(db_cfg) = &cfg.database {
         if db_cfg.enabled {
-            info!("开始推送数据到 MySQL");
+            info!("开始推送数据到 {}", db_cfg.db_type);
             match gpu_npu_util_reporter::db::push_to_database(
                 &records,
                 db_cfg,
