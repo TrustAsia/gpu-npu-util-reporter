@@ -161,11 +161,11 @@ pub async fn push_to_database(
     };
 
     let result = async {
-        // 检查/创建表
-        ensure_table(&pool, cfg, &mapped_cols).await?;
+        // 检查/创建表（Doris 返回是否需要自动补 id 列）
+        let fill_id = ensure_table(&pool, cfg, &mapped_cols).await?;
 
         // 逐行 INSERT
-        let count = insert_records(&pool, cfg, records, &mapped_cols, mapping_values, tz)
+        let count = insert_records(&pool, cfg, records, &mapped_cols, mapping_values, tz, fill_id)
             .await?;
 
         info!("数据库推送完成：{count} 行写入 {db}.{table}", db = cfg.database, table = cfg.table);
@@ -235,11 +235,14 @@ fn atty_is_terminal() -> bool {
 /// - 表不存在 → 自动 CREATE TABLE
 /// - 表存在但缺列 → 生成 DDL 文件并退出
 /// - 表存在但有多余列 → 询问用户
+/// - Doris：检测"未映射的 NOT NULL 无默认值列"（见 [`classify_unmapped_required`]）
+///
+/// 返回值：`true` 表示 Doris 目标表含 `id` 列需要程序自动补值。
 async fn ensure_table(
     pool: &Pool<MySql>,
     cfg: &DatabaseConfig,
     mapped_cols: &[(&str, &str, &str, Option<&str>, &str)],
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     // 表存在性检查：Doris 不支持 prepared statement，参数内联后走文本协议
     let table_exists = if cfg.db_type == "doris" {
         let sql = format!(
@@ -294,7 +297,7 @@ async fn ensure_table(
                 })?;
         }
         info!("表 {}.{} 创建成功", cfg.database, cfg.table);
-        return Ok(());
+        return Ok(false);
     }
 
     // 表存在：获取现有列
@@ -393,21 +396,61 @@ async fn ensure_table(
         }
     }
 
-    Ok(())
+    // Doris：检测"程序未映射的 NOT NULL 无默认值列"。
+    // 宽松模式（insert_strict=false）下 INSERT 缺这些列会**静默过滤整行**，
+    // 表现为"推送成功但 0 行落库"（affected=0），必须显式处理：
+    // - `id` 整型列（Doris 预建表仿 MySQL 结构的常见"自增ID"列，DUPLICATE
+    //   模型不支持 AUTO_INCREMENT）→ 自动补值（Unix 秒 + 行号）
+    // - 其他此类列 → 报错退出，避免假成功
+    if cfg.db_type == "doris" {
+        let (fill_id, blocking) = classify_unmapped_required(&existing_columns, &configured_db_names);
+        if !blocking.is_empty() {
+            return Err(AppError::Database {
+                detail: format!(
+                    "表 {}.{} 含未映射且无默认值的 NOT NULL 列「{}」：Doris 宽松模式下\
+                     INSERT 缺这些列会静默过滤整行。请为该列配置默认值（ALTER TABLE ... \
+                     MODIFY COLUMN ... DEFAULT ...），或调整 database.columns 映射后重试",
+                    cfg.database,
+                    cfg.table,
+                    blocking.join("、")
+                ),
+            });
+        }
+        if fill_id {
+            info!(
+                "表 {}.{} 含未映射的 NOT NULL 列 id（无默认值），推送时自动补值（Unix 时间戳 + 行号）",
+                cfg.database, cfg.table
+            );
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
-/// 获取表的现有列名和类型。
+/// 表列元信息（schema 校验用）。
+#[derive(Debug, Clone)]
+struct TableColumn {
+    data_type: String,
+    is_nullable: bool,
+    column_default: Option<String>,
+}
+
+/// 获取表的现有列名和列元信息。
 ///
 /// Doris 不支持 prepared statement，参数内联后走文本协议（文本协议下
 /// 所有列按字符串解码，直接 `try_get::<Option<String>>` 读取）。
+/// Doris 分支额外读取 `IS_NULLABLE` / `COLUMN_DEFAULT`，用于检测
+/// "程序未映射的 NOT NULL 无默认值列"（宽松模式下这些列缺失会让整行被过滤）。
+/// MySQL 分支保持原有行为（id 自增由数据库处理，无需检查）。
 async fn get_table_columns(
     pool: &Pool<MySql>,
     cfg: &DatabaseConfig,
-) -> Result<HashMap<String, String>, AppError> {
+) -> Result<HashMap<String, TableColumn>, AppError> {
     if cfg.db_type == "doris" {
         use sqlx::Row;
         let sql = format!(
-            "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns WHERE table_schema = '{}' AND table_name = '{}' ORDER BY ORDINAL_POSITION",
+            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM information_schema.columns WHERE table_schema = '{}' AND table_name = '{}' ORDER BY ORDINAL_POSITION",
             escape_mysql_string(&cfg.database),
             escape_mysql_string(&cfg.table)
         );
@@ -429,7 +472,20 @@ async fn get_table_columns(
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            map.insert(name, data_type);
+            let is_nullable = row
+                .try_get::<Option<String>, _>(2)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.eq_ignore_ascii_case("yes"));
+            let column_default = row.try_get::<Option<String>, _>(3).ok().flatten();
+            map.insert(
+                name,
+                TableColumn {
+                    data_type,
+                    is_nullable,
+                    column_default,
+                },
+            );
         }
         Ok(map)
     } else {
@@ -442,8 +498,47 @@ async fn get_table_columns(
                 .map_err(|e| AppError::Database {
                     detail: format!("查询表结构失败：{e}"),
                 })?;
-        Ok(rows.into_iter().collect())
+        Ok(rows
+            .into_iter()
+            .map(|(name, data_type)| {
+                (
+                    name,
+                    TableColumn {
+                        data_type,
+                        is_nullable: true,
+                        column_default: None,
+                    },
+                )
+            })
+            .collect())
     }
+}
+
+/// 检测表中"程序未映射的 NOT NULL 无默认值列"，返回：
+/// - `fill_id`：是否存在名为 `id` 的整型列（Doris 预建表常见"自增 ID"列，
+///   但 DUPLICATE 模型不支持 AUTO_INCREMENT，需程序自动补值）
+/// - `blocking`：除 id 外必须报错的列（Doris 宽松模式下 INSERT 缺这些列会
+///   静默过滤整行，必须显式暴露而非假成功）
+fn classify_unmapped_required(
+    existing: &HashMap<String, TableColumn>,
+    configured: &HashSet<&str>,
+) -> (bool, Vec<String>) {
+    let unmapped: Vec<(&String, &TableColumn)> = existing
+        .iter()
+        .filter(|(name, _)| !configured.contains(name.as_str()))
+        .filter(|(_, info)| !info.is_nullable && info.column_default.is_none())
+        .collect();
+    let mut fill_id = false;
+    let mut blocking = Vec::new();
+    for (name, info) in unmapped {
+        if name == "id" && info.data_type.to_ascii_lowercase().contains("int") {
+            fill_id = true;
+        } else {
+            blocking.push(name.clone());
+        }
+    }
+    blocking.sort();
+    (fill_id, blocking)
 }
 
 /// 转义 MySQL 字符串字面量中的特殊字符（用于 DDL COMMENT）。
@@ -607,6 +702,7 @@ async fn insert_records(
     mapped_cols: &[(&str, &str, &str, Option<&str>, &str)],
     mapping_values: &HashMap<(usize, String), String>,
     tz: Tz,
+    fill_id: bool,
 ) -> Result<usize, AppError> {
     // 构建 mapping_borrowed 索引
     let mapping_borrowed: HashMap<(usize, &str), &str> = mapping_values
@@ -649,7 +745,7 @@ async fn insert_records(
 
     if cfg.db_type == "doris" {
         // Doris：无事务 + 文本协议（绑定值内联转义进 SQL）
-        insert_without_tx(pool, &cfg.table, &db_names, &rows_values).await
+        insert_without_tx(pool, &cfg.table, &db_names, &rows_values, fill_id).await
     } else {
         insert_with_tx(pool, &sql, &rows_values).await
     }
@@ -791,26 +887,46 @@ async fn insert_with_tx(
 /// 无事务版插入（Doris）：逐行独立提交，首错即停。
 /// Doris 不支持事务与 prepared statement，SQL 绑定值内联转义后走文本协议；
 /// 部分行写入失败时无法回滚，可能残留部分行。
+/// `fill_id` 为 true 时在列首补 `id` 列（Doris 预建表仿 MySQL 的自增 ID 列，
+/// 值 = Unix 秒 + 行号，保证单次推送内唯一；DUPLICATE 模型下重复 id 无冲突）。
 async fn insert_without_tx(
     pool: &Pool<MySql>,
     table: &str,
     db_names: &[&str],
     rows_values: &[Vec<Option<String>>],
+    fill_id: bool,
 ) -> Result<usize, AppError> {
-    let cols = db_names
-        .iter()
-        .map(|n| format!("`{n}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let cols = if fill_id {
+        format!(
+            "`id`, {}",
+            db_names
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        db_names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let base_ts = chrono::Utc::now().timestamp();
     let mut count = 0usize;
     let mut first_error: Option<String> = None;
     for (row_idx, values) in rows_values.iter().enumerate() {
+        let id_literal = if fill_id {
+            format!("{}, ", base_ts + row_idx as i64)
+        } else {
+            String::new()
+        };
         let vals = values
             .iter()
             .map(sql_literal)
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("INSERT INTO `{table}` ({cols}) VALUES ({vals})");
+        let sql = format!("INSERT INTO `{table}` ({cols}) VALUES ({id_literal}{vals})");
         match sqlx::raw_sql(&sql).execute(pool).await {
             Ok(res) => {
                 // Doris insert_strict 默认 false：列值类型不兼容的行会被静默丢弃
@@ -922,6 +1038,75 @@ mod tests {
         assert_eq!(infer_sql_type("source_name"), "VARCHAR(255) DEFAULT NULL");
         assert_eq!(infer_sql_type("host_ip"), "VARCHAR(255) DEFAULT NULL");
         assert_eq!(infer_sql_type("time_range"), "VARCHAR(64) DEFAULT NULL");
+    }
+
+    fn column(name: &str, data_type: &str, nullable: bool, default: Option<&str>) -> (String, TableColumn) {
+        (
+            name.into(),
+            TableColumn {
+                data_type: data_type.into(),
+                is_nullable: nullable,
+                column_default: default.map(ToString::to_string),
+            },
+        )
+    }
+
+    #[test]
+    fn classify_unmapped_required_no_unmapped_required() {
+        let existing = HashMap::from([
+            column("host_ip", "varchar", true, None),
+            column("id", "int", false, Some("0")), // 有默认值，不算必需
+        ]);
+        let configured = HashSet::from(["host_ip"]);
+        let (fill_id, blocking) = classify_unmapped_required(&existing, &configured);
+        assert!(!fill_id);
+        assert!(blocking.is_empty());
+    }
+
+    #[test]
+    fn classify_unmapped_required_fills_id_only() {
+        // 仿 MySQL 结构的 Doris 预建表：id 为 NOT NULL 无默认值 → 自动补
+        let existing = HashMap::from([
+            column("id", "int", false, None),
+            column("host_ip", "varchar", true, None),
+        ]);
+        let configured = HashSet::from(["host_ip"]);
+        let (fill_id, blocking) = classify_unmapped_required(&existing, &configured);
+        assert!(fill_id, "id 列应自动补值");
+        assert!(blocking.is_empty());
+    }
+
+    #[test]
+    fn classify_unmapped_required_fills_bigint_id() {
+        let existing = HashMap::from([column("id", "bigint", false, None)]);
+        let configured = HashSet::new();
+        let (fill_id, blocking) = classify_unmapped_required(&existing, &configured);
+        assert!(fill_id);
+        assert!(blocking.is_empty());
+    }
+
+    #[test]
+    fn classify_unmapped_required_blocks_other_not_null_columns() {
+        // id + 其他 NOT NULL 无默认值列 → id 可补，其他列必须报错
+        let existing = HashMap::from([
+            column("id", "int", false, None),
+            column("team_env", "varchar", false, None),
+            column("host_ip", "varchar", true, None),
+        ]);
+        let configured = HashSet::from(["host_ip"]);
+        let (fill_id, blocking) = classify_unmapped_required(&existing, &configured);
+        assert!(fill_id, "id 仍应自动补值");
+        assert_eq!(blocking, vec!["team_env".to_string()]);
+    }
+
+    #[test]
+    fn classify_unmapped_required_non_int_id_blocks() {
+        // id 列不是整型 → 不能自动补，按普通必需列报错
+        let existing = HashMap::from([column("id", "varchar", false, None)]);
+        let configured = HashSet::new();
+        let (fill_id, blocking) = classify_unmapped_required(&existing, &configured);
+        assert!(!fill_id);
+        assert_eq!(blocking, vec!["id".to_string()]);
     }
 
     #[test]
