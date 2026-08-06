@@ -812,7 +812,24 @@ async fn insert_without_tx(
             .join(", ");
         let sql = format!("INSERT INTO `{table}` ({cols}) VALUES ({vals})");
         match sqlx::raw_sql(&sql).execute(pool).await {
-            Ok(_) => count += 1,
+            Ok(res) => {
+                // Doris insert_strict 默认 false：列值类型不兼容的行会被静默丢弃
+                // 且语句仍返回成功——affected=0 即行未写入，必须显式报错而非假成功
+                let affected = res.rows_affected();
+                if affected == 0 {
+                    let msg = format!(
+                        "第 {} 行 INSERT 返回成功但 affected=0——行被 Doris 静默丢弃（列值格式可能不兼容；\
+                         可执行 SET insert_strict = true 后重试以获取具体错误）",
+                        row_idx + 1
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(msg.clone());
+                    }
+                    warn!("{msg}");
+                    break;
+                }
+                count += 1;
+            }
             Err(e) => {
                 if first_error.is_none() {
                     first_error = Some(format!("{e}"));
