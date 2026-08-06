@@ -169,6 +169,12 @@ pub async fn push_to_database(
             .await?;
 
         info!("数据库推送完成：{count} 行写入 {db}.{table}", db = cfg.database, table = cfg.table);
+
+        // Doris 读回校验：写入后 SELECT COUNT(*) 读回，帮助定位
+        // "推送成功但查不到数据"的场景（数据未落库 vs 查询端连错实例）
+        if cfg.db_type == "doris" {
+            verify_doris_row_count(&pool, cfg, count).await?;
+        }
         Ok::<(), AppError>(())
     }
     .await;
@@ -655,6 +661,47 @@ fn sql_literal(v: &Option<String>) -> String {
     match v {
         Some(s) => format!("'{}'", escape_mysql_string(s)),
         None => "NULL".to_string(),
+    }
+}
+
+/// Doris 读回校验：推送完成后 `SELECT COUNT(*)` 读回表中实际行数。
+///
+/// 用于诊断"推送成功但查询为空"的场景：读回 > 0 说明数据已落库，
+/// 查询为空是查询端问题（连错实例/端口/库）；读回为 0 则写入本身有问题。
+/// 读回失败只记 Warning，不阻断主流程。
+async fn verify_doris_row_count(
+    pool: &Pool<MySql>,
+    cfg: &DatabaseConfig,
+    written: usize,
+) -> Result<(), AppError> {
+    use sqlx::Row;
+    let sql = format!("SELECT COUNT(*) FROM `{}`", cfg.table);
+    match sqlx::raw_sql(&sql).fetch_all(pool).await {
+        Ok(rows) => {
+            let actual: i64 = rows
+                .first()
+                .and_then(|r| r.try_get::<Option<String>, _>(0).ok().flatten())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            info!(
+                "Doris 读回校验：表 {db}.{table} 当前实际 {actual} 行（本次写入 {written} 行）",
+                db = cfg.database,
+                table = cfg.table
+            );
+            if actual == 0 && written > 0 {
+                warn!(
+                    "Doris 读回校验异常：本次写入 {written} 行但读回 0 行——数据可能未真正落库，\
+                     请检查查询连接（端口/库）是否与推送目标一致（{host}:{port}）",
+                    host = cfg.host,
+                    port = cfg.port
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            warn!("Doris 读回校验失败（仅警告，不影响结果）：{e}");
+            Ok(())
+        }
     }
 }
 
