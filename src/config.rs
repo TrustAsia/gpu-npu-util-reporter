@@ -1009,9 +1009,11 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 });
             }
         }
-        // 校验模型信息配置的指标名/标签名合法性
+        // 校验模型信息配置的指标名/标签名合法性。
+        // 仅在校验启用时进行：enabled=false 意味着跳过指标查询，
+        // 配置值非法不应阻断整个配置加载（与模板注释「false 仅跳过指标查询」一致）。
         if let Some(mi) = &src.model_info {
-            if !is_valid_metric_name(&mi.metric) {
+            if mi.enabled && !is_valid_metric_name(&mi.metric) {
                 return Err(AppError::Config {
                     path: path.into(),
                     reason: format!(
@@ -1020,7 +1022,7 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                     ),
                 });
             }
-            if !is_valid_label_name(&mi.model_label) {
+            if mi.enabled && !is_valid_label_name(&mi.model_label) {
                 return Err(AppError::Config {
                     path: path.into(),
                     reason: format!(
@@ -2340,6 +2342,22 @@ mod tests {
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "非法 model_info.model_label 应被拒绝");
+    }
+
+    #[test]
+    fn model_info_disabled_skips_validation() {
+        // enabled=false 意味着跳过指标查询（模板注释承诺），
+        // 配置值非法不应阻断整个配置加载。
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].model_info = Some(crate::devices::ModelInfoSpec {
+            enabled: false,
+            metric: "metric{evil=\"yes\"}".into(),
+            model_label: "bad:label".into(),
+        });
+        assert!(
+            validate_config(&cfg, "test.yaml").is_ok(),
+            "enabled=false 时应跳过 model_info 校验"
+        );
     }
 
     #[test]

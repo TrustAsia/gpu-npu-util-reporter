@@ -381,7 +381,11 @@ pub async fn collect_model_info(
             continue;
         };
         let model = s.labels.get(&spec.model_label).cloned();
-        let model = if model.as_deref() == Some(UNKNOWN_MODEL_SENTINEL) {
+        // 空字符串与 "unknown" 哨兵都视为无模型（与查不到等价，走推导兜底）
+        let model = if model
+            .as_deref()
+            .is_none_or(|m| m.is_empty() || m == UNKNOWN_MODEL_SENTINEL)
+        {
             None
         } else {
             model
@@ -2923,6 +2927,11 @@ mod tests {
                 labels: labels(&[("namespace", "ns-1"), ("pod", "pod-no-model")]),
                 points: vec![(t(0), 1.0)],
             },
+            // 空字符串模型名 → 同样视为无模型（None），走推导兜底
+            Series {
+                labels: labels(&[("namespace", "ns-1"), ("pod", "pod-empty-model"), ("inference_model", "")]),
+                points: vec![(t(0), 1.0)],
+            },
         ];
         let fetcher = MockFetcher::new().when("inference_model_info", Ok(series));
         let spec = ModelInfoSpec {
@@ -2934,6 +2943,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(map.get(&("ns-1".into(), "pod-u".into())), Some(&None), "unknown 应以 None 存入");
-        assert_eq!(map.len(), 2, "缺标签的 series 应被跳过");
+        assert_eq!(
+            map.get(&("ns-1".into(), "pod-empty-model".into())),
+            Some(&None),
+            "空模型名应以 None 存入"
+        );
+        assert_eq!(map.len(), 3, "缺标签的 series 应被跳过，其余 3 条都应存入");
     }
 }

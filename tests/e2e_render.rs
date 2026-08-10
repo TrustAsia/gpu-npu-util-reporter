@@ -28,7 +28,7 @@ fn renders_report_with_highlight_and_reads_back() {
         namespace: "default".into(),
         pod: "p1".into(),
         container: "c1".into(),
-        inference_model: String::new(),
+        inference_model: "model-x".into(),
         core_avg: Some(90.0),
         core_peak: Some(99.0),
         core_peak_time: Some(Utc.timestamp_opt(1000, 0).unwrap()),
@@ -86,6 +86,15 @@ fn renders_report_with_highlight_and_reads_back() {
     let range = r.worksheet_range(&name).unwrap();
     assert_eq!(range.height(), 2, "1 表头 + 1 数据行");
     assert_eq!(range.width(), BASE_COLUMNS.len(), "列数应为基础列数");
+
+    // 「模型名称」表头在「容器名称」之后，数据行显示 rec.inference_model
+    let rows: Vec<Vec<String>> = range
+        .rows()
+        .map(|row| row.iter().map(|c| c.to_string()).collect())
+        .collect();
+    let container_pos = rows[0].iter().position(|h| h == "容器名称").unwrap();
+    assert_eq!(rows[0][container_pos + 1], "模型名称", "「模型名称」应在「容器名称」之后");
+    assert_eq!(rows[1][container_pos + 1], "model-x", "数据行应显示模型名");
 }
 
 #[test]
