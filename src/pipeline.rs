@@ -351,8 +351,8 @@ const UNKNOWN_MODEL_SENTINEL: &str = "unknown";
 ///
 /// - 同一 pod 出现多条 series（标签集不同）时，取时间段内有数据的最后一条
 ///   （按 series 最大点时间戳比较）——与 `last_in_range` 归属语义一致
-/// - 指标同时带 `pod` 与 `pod_name` 标签，两个键都插入（兼容 DCGM 与 NPU
-///   exporter 的不同命名）
+/// - 指标同时带 `pod` 与 `pod_name` 标签（值相同），取 pod 优先、pod_name
+///   兜底，兼容 DCGM 与 NPU exporter 的不同标签名
 /// - `inference_model` 值为 `"unknown"` 或标签缺失 → 以 `None` 存入
 ///   （与查不到等价，由 `apply_model_info` 走推导兜底）
 /// - 缺 namespace/pod 标签的 series 直接跳过（无法匹配）
