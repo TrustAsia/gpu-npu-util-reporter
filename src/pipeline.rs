@@ -288,6 +288,7 @@ pub async fn collect_device(
             namespace,
             pod,
             container,
+            inference_model: String::new(),
             core_avg: c_avg,
             core_peak: c_peak,
             core_peak_time: c_peak_t,
