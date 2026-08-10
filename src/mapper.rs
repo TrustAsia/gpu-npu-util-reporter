@@ -33,6 +33,7 @@ const CORE_BASE_COLUMNS: &[&str] = &[
     "Namespace",
     "Pod",
     "容器名称",
+    "模型名称",
     "取值时间范围",
     "核心利用率平均值",
     "核心利用率峰值",
@@ -63,6 +64,7 @@ pub const CORE_BASE_LOCAL_NAMES: &[&str] = &[
     "namespace",
     "pod",
     "container",
+    "inference_model",
     "time_range",
     "core_avg",
     "core_peak",
@@ -1349,5 +1351,23 @@ mod tests {
         assert!(flags.has_host_handle, "has_host_handle 应为 true（dev_a 有 handle_expr），不应被 dev_b 覆盖");
         assert!(flags.has_host_cpu);
         assert!(flags.has_host_mem);
+    }
+
+    #[test]
+    fn model_name_column_follows_container_column() {
+        let cols = build_base_columns(ColumnFlags::default());
+        let container_idx = cols.iter().position(|c| c == "容器名称").unwrap();
+        assert_eq!(
+            cols.get(container_idx + 1).map(String::as_str),
+            Some("模型名称"),
+            "「模型名称」应在「容器名称」之后"
+        );
+        let names = build_base_local_names(ColumnFlags::default());
+        let local_idx = names.iter().position(|n| n == "container").unwrap();
+        assert_eq!(
+            names.get(local_idx + 1).map(String::as_str),
+            Some("inference_model"),
+            "本地字段名 inference_model 应在 container 之后"
+        );
     }
 }

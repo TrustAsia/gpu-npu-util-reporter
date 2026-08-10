@@ -240,6 +240,7 @@ fn cell_value(
         "Namespace" => CellValue::Text(rec.namespace.clone()),
         "Pod" => CellValue::Text(rec.pod.clone()),
         "容器名称" => CellValue::Text(rec.container.clone()),
+        "模型名称" => CellValue::Text(rec.inference_model.clone()),
         "数据开始时间" => CellValue::Text(ts(rec.range_start)),
         "数据结束时间" => CellValue::Text(ts(rec.range_end)),
         "取值时间范围" => CellValue::Text(format!(
@@ -626,5 +627,21 @@ mod tests {
         let time_val = cell_value_for_db(&rec, "核心利用率峰值出现时间", &mapping_borrowed, 0, tz);
         assert!(time_val.is_some(), "Time 值应返回 Some");
         assert!(time_val.as_ref().unwrap().contains("1970"), "Time 值应包含日期");
+    }
+
+    #[test]
+    fn cell_value_reads_inference_model() {
+        use crate::processor::CardRecord;
+        let rec: CardRecord = CardRecord {
+            inference_model: "qwen3-8b-mss".into(),
+            ..Default::default()
+        };
+        let mapping_borrowed: HashMap<(usize, &str), &str> = HashMap::new();
+        let tz: chrono_tz::Tz = "Asia/Shanghai".parse().unwrap();
+        assert_eq!(
+            cell_value_for_db(&rec, "模型名称", &mapping_borrowed, 0, tz),
+            Some("qwen3-8b-mss".into()),
+            "模型名称列应输出推理模型名"
+        );
     }
 }
