@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 /// 一张卡的时间范围内统计结果——对应报表一行。
 ///
 /// 所有数值字段为 `Option`：`None` 表示该卡/该指标无有效数据，报表显示 N/A。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct CardRecord {
     /// 数据来源（Prometheus 别名）。
     pub source_name: String,

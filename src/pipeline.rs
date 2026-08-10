@@ -14,7 +14,8 @@
 //!   被静默覆写成空 series 而产生"幽灵行"。
 
 use crate::config::AppConfig;
-use crate::devices::{DeviceSpec, HostMetricsSpec, MemoryStrategy};
+use crate::devices::{DeviceSpec, HostMetricsSpec, MemoryStrategy, ModelInfoSpec};
+use crate::error::AppError;
 use crate::fetcher::MetricFetcher;
 use crate::processor::{self, aggregate, last_non_empty, CardRecord, Series};
 use crate::MAX_FALLBACK_DEPTH;
@@ -327,6 +328,86 @@ pub async fn collect_device(
         });
     }
     out
+}
+
+/// 模型名推导规则：pod 名按 `-` 分隔取前 3 段（保留到第 2 个连字符为止）。
+///
+/// 例：`tele-tts-onnx-hanyu-v20260604-54d775747-26hhf` → `tele-tts-onnx`。
+/// pod 名为空或不足 3 段时返回 `"未知"`。
+#[must_use]
+pub fn derive_model_name(pod: &str) -> String {
+    let parts: Vec<&str> = pod.split('-').collect();
+    if parts.len() >= 3 {
+        parts[..3].join("-")
+    } else {
+        "未知".into()
+    }
+}
+
+/// `inference_model_info` 标签中"无模型"的哨兵值。
+const UNKNOWN_MODEL_SENTINEL: &str = "unknown";
+
+/// 查询模型信息指标，构建 `(namespace, pod) → 模型名` 映射。
+///
+/// - 同一 pod 出现多条 series（标签集不同）时，取时间段内有数据的最后一条
+///   （按 series 最大点时间戳比较）——与 `last_in_range` 归属语义一致
+/// - 指标同时带 `pod` 与 `pod_name` 标签，两个键都插入（兼容 DCGM 与 NPU
+///   exporter 的不同命名）
+/// - `inference_model` 值为 `"unknown"` 或标签缺失 → 以 `None` 存入
+///   （与查不到等价，由 `apply_model_info` 走推导兜底）
+/// - 缺 namespace/pod 标签的 series 直接跳过（无法匹配）
+pub async fn collect_model_info(
+    fetcher: &dyn MetricFetcher,
+    spec: &ModelInfoSpec,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    step: Duration,
+) -> Result<HashMap<(String, String), Option<String>>, AppError> {
+    let series = fetcher.query_range(&spec.metric, start, end, step).await?;
+    // (namespace, pod) → (该 series 最大点时间戳, 模型名 Option)
+    let mut best: HashMap<(String, String), (DateTime<Utc>, Option<String>)> = HashMap::new();
+    for s in series {
+        let ns = s.labels.get("namespace").cloned().unwrap_or_default();
+        let pod = s
+            .labels
+            .get("pod")
+            .cloned()
+            .or_else(|| s.labels.get("pod_name").cloned())
+            .unwrap_or_default();
+        if ns.is_empty() || pod.is_empty() {
+            continue;
+        }
+        let Some(max_ts) = s.points.iter().map(|(ts, _)| *ts).max() else {
+            continue;
+        };
+        let model = s.labels.get(&spec.model_label).cloned();
+        let model = if model.as_deref() == Some(UNKNOWN_MODEL_SENTINEL) {
+            None
+        } else {
+            model
+        };
+        let key = (ns, pod);
+        if best.get(&key).is_none_or(|(prev_ts, _)| max_ts > *prev_ts) {
+            best.insert(key, (max_ts, model));
+        }
+    }
+    Ok(best.into_iter().map(|(k, (_, m))| (k, m)).collect())
+}
+
+/// 按规则填充每条记录的 `inference_model` 字段（标签优先，否则从 pod 名推导）。
+///
+/// 即使映射为空（指标未启用/查询失败），也应调用本函数——推导不依赖指标。
+pub fn apply_model_info(
+    records: &mut [CardRecord],
+    map: &HashMap<(String, String), Option<String>>,
+) {
+    for rec in records {
+        let key = (rec.namespace.clone(), rec.pod.clone());
+        rec.inference_model = match map.get(&key) {
+            Some(Some(model)) => model.clone(),
+            _ => derive_model_name(&rec.pod),
+        };
+    }
 }
 
 /// 把一条 series 合并进 `Option<Series>` 槽位：空则初始化；非空则把新点追加
@@ -1373,6 +1454,7 @@ pub fn build_instance_regex(ip: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::devices::ModelInfoSpec;
     use crate::error::AppError;
     use crate::fetcher::MockFetcher;
     use chrono::TimeZone;
@@ -2723,5 +2805,135 @@ mod tests {
         // 验证句柄数平均值舍弃小数部分
         let val: f64 = 1234.5678;
         assert_eq!(val.trunc(), 1234.0);
+    }
+
+    // ---- 模型名称：推导 ----
+
+    #[test]
+    fn derive_model_name_takes_first_three_segments() {
+        assert_eq!(
+            derive_model_name("tele-tts-onnx-hanyu-v20260604-54d775747-26hhf"),
+            "tele-tts-onnx"
+        );
+        assert_eq!(derive_model_name("a-b-c"), "a-b-c", "恰 3 段原样返回");
+    }
+
+    #[test]
+    fn derive_model_name_falls_back_to_unknown() {
+        assert_eq!(derive_model_name(""), "未知");
+        assert_eq!(derive_model_name("a-b"), "未知", "不足 3 段");
+        assert_eq!(derive_model_name("solo"), "未知", "单段");
+    }
+
+    // ---- 模型名称：apply_model_info 四分支 ----
+
+    #[test]
+    fn apply_model_info_uses_label_when_available() {
+        let mut records = vec![CardRecord {
+            namespace: "ns-1".into(),
+            pod: "pod-a".into(),
+            ..Default::default()
+        }];
+        let map = HashMap::from([(("ns-1".to_string(), "pod-a".to_string()), Some("qwen3-8b-mss".to_string()))]);
+        apply_model_info(&mut records, &map);
+        assert_eq!(records[0].inference_model, "qwen3-8b-mss");
+    }
+
+    #[test]
+    fn apply_model_info_derives_when_label_unknown() {
+        let mut records = vec![CardRecord {
+            namespace: "ns-1".into(),
+            pod: "tele-tts-onnx-hanyu-v20260604-54d775747-26hhf".into(),
+            ..Default::default()
+        }];
+        let map = HashMap::from([(("ns-1".to_string(), "tele-tts-onnx-hanyu-v20260604-54d775747-26hhf".to_string()), None)]);
+        apply_model_info(&mut records, &map);
+        assert_eq!(records[0].inference_model, "tele-tts-onnx");
+    }
+
+    #[test]
+    fn apply_model_info_derives_when_pod_not_in_map() {
+        let mut records = vec![CardRecord {
+            namespace: "ns-1".into(),
+            pod: "qwen3-8b-mss-v1-7c45667677-hq6fv".into(),
+            ..Default::default()
+        }];
+        apply_model_info(&mut records, &HashMap::new());
+        assert_eq!(records[0].inference_model, "qwen3-8b-mss");
+    }
+
+    #[test]
+    fn apply_model_info_writes_unknown_when_derivation_fails() {
+        let mut records = vec![CardRecord {
+            namespace: "ns-1".into(),
+            pod: "ab".into(),
+            ..Default::default()
+        }];
+        apply_model_info(&mut records, &HashMap::new());
+        assert_eq!(records[0].inference_model, "未知");
+    }
+
+    // ---- 模型名称：collect_model_info 映射构建 ----
+
+    #[tokio::test]
+    async fn collect_model_info_indexes_both_pod_labels_and_takes_latest() {
+        // 同一 (ns, pod)：早的 series 模型 X，晚的 series 模型 Y → 取 Y
+        let series = vec![
+            Series {
+                labels: labels(&[("namespace", "ns-1"), ("pod", "pod-a"), ("pod_name", "pod-a"), ("inference_model", "model-x")]),
+                points: vec![(t(0), 1.0)],
+            },
+            Series {
+                labels: labels(&[("namespace", "ns-1"), ("pod", "pod-a"), ("pod_name", "pod-a"), ("inference_model", "model-y")]),
+                points: vec![(t(60), 1.0)],
+            },
+            // 只有 pod_name 标签的 series（NPU 风格）也应被索引
+            Series {
+                labels: labels(&[("namespace", "ns-2"), ("pod_name", "pod-b"), ("inference_model", "model-b")]),
+                points: vec![(t(60), 1.0)],
+            },
+        ];
+        let fetcher = MockFetcher::new().when("inference_model_info", Ok(series));
+        let spec = ModelInfoSpec {
+            enabled: true,
+            metric: "inference_model_info".into(),
+            model_label: "inference_model".into(),
+        };
+        let map = collect_model_info(&fetcher, &spec, t(0), t(120), Duration::seconds(60))
+            .await
+            .unwrap();
+        assert_eq!(map.get(&("ns-1".into(), "pod-a".into())), Some(&Some("model-y".into())), "同 pod 多 series 应取最后一条");
+        assert_eq!(map.get(&("ns-2".into(), "pod-b".into())), Some(&Some("model-b".into())), "pod_name 标签也应索引");
+    }
+
+    #[tokio::test]
+    async fn collect_model_info_marks_unknown_and_skips_missing_labels() {
+        let series = vec![
+            Series {
+                labels: labels(&[("namespace", "ns-1"), ("pod", "pod-u"), ("inference_model", "unknown")]),
+                points: vec![(t(0), 1.0)],
+            },
+            // 缺 namespace 或缺 pod 标签 → 跳过
+            Series {
+                labels: labels(&[("pod", "pod-nons"), ("inference_model", "model-n")]),
+                points: vec![(t(0), 1.0)],
+            },
+            // 缺 model_label → 视为 unknown（None）
+            Series {
+                labels: labels(&[("namespace", "ns-1"), ("pod", "pod-no-model")]),
+                points: vec![(t(0), 1.0)],
+            },
+        ];
+        let fetcher = MockFetcher::new().when("inference_model_info", Ok(series));
+        let spec = ModelInfoSpec {
+            enabled: true,
+            metric: "inference_model_info".into(),
+            model_label: "inference_model".into(),
+        };
+        let map = collect_model_info(&fetcher, &spec, t(0), t(120), Duration::seconds(60))
+            .await
+            .unwrap();
+        assert_eq!(map.get(&("ns-1".into(), "pod-u".into())), Some(&None), "unknown 应以 None 存入");
+        assert_eq!(map.len(), 2, "缺标签的 series 应被跳过");
     }
 }
