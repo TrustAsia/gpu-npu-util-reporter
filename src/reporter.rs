@@ -492,6 +492,7 @@ mod tests {
             namespace: String::new(),
             pod: String::new(),
             container: String::new(),
+            inference_model: String::new(),
             core_avg: None,
             core_peak: None,
             core_peak_time: None,
@@ -564,6 +565,7 @@ mod tests {
             namespace: String::new(),
             pod: String::new(),
             container: String::new(),
+            inference_model: String::new(),
             core_avg: Some(85.5),       // Pct
             core_peak: Some(99.9),      // Pct
             core_peak_time: Some(Utc.timestamp_opt(1000, 0).unwrap()), // Time

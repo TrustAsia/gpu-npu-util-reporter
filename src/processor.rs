@@ -27,6 +27,8 @@ pub struct CardRecord {
     pub pod: String,
     /// 容器归属。
     pub container: String,
+    /// 模型名称（标签值或从 pod 名推导；取不到为 "未知"）。
+    pub inference_model: String,
     /// 核心利用率平均值（0–100）。None = N/A。
     pub core_avg: Option<f64>,
     /// 核心利用率峰值。

@@ -347,6 +347,7 @@ mod tests {
             namespace: String::new(),
             pod: String::new(),
             container: String::new(),
+            inference_model: String::new(),
             core_avg: None,
             core_peak: None,
             core_peak_time: None,

@@ -41,6 +41,10 @@ pub struct SourceConfig {
     pub timeout_secs: u64,
     /// 该源采集的设备类型 key（引用 devices 表）。
     pub device_types: Vec<String>,
+    /// 模型名称采集配置（可选）。不配置 = 跳过指标查询，
+    /// 「模型名称」列仍显示从 pod 名推导的名称。
+    #[serde(default)]
+    pub model_info: Option<crate::devices::ModelInfoSpec>,
 }
 
 const fn default_timeout() -> u64 {
@@ -998,6 +1002,27 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 });
             }
         }
+        // 校验模型信息配置的指标名/标签名合法性
+        if let Some(mi) = &src.model_info {
+            if !is_valid_metric_name(&mi.metric) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "数据源「{}」的 model_info.metric「{}」不是合法的 Prometheus 指标名",
+                        src.name, mi.metric
+                    ),
+                });
+            }
+            if !is_valid_label_name(&mi.model_label) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: format!(
+                        "数据源「{}」的 model_info.model_label「{}」不是合法的 Prometheus 标签名",
+                        src.name, mi.model_label
+                    ),
+                });
+            }
+        }
     }
     // 跨源 device_types 重复：两个数据源监控同一设备类型会导致记录重复。
     let mut global_dt: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -1673,6 +1698,7 @@ mod tests {
             url: "http://prometheus2:9090".into(),
             timeout_secs: 30,
             device_types: vec!["nvidia_a10".into()], // 与 source1 重复
+            model_info: None,
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "跨源重复 device_types 应被拒绝");
@@ -2282,5 +2308,46 @@ mod tests {
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_ok(), "db_type 含括号内逗号应被允许");
+    }
+
+    #[test]
+    fn model_info_rejects_invalid_metric_name() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].model_info = Some(crate::devices::ModelInfoSpec {
+            enabled: true,
+            metric: "metric{evil=\"yes\"}".into(),
+            model_label: "inference_model".into(),
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法 model_info.metric 应被拒绝");
+        assert!(format!("{}", r.unwrap_err()).contains("model_info"), "错误信息应提及 model_info");
+    }
+
+    #[test]
+    fn model_info_rejects_invalid_model_label() {
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.sources[0].model_info = Some(crate::devices::ModelInfoSpec {
+            enabled: true,
+            metric: "inference_model_info".into(),
+            model_label: "bad:label".into(),
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(r.is_err(), "非法 model_info.model_label 应被拒绝");
+    }
+
+    #[test]
+    fn model_info_defaults_round_trip() {
+        // 默认模板不含 model_info → Option 为 None，旧配置不受影响
+        let cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        assert!(cfg.sources[0].model_info.is_none());
+    }
+
+    #[test]
+    fn model_info_serde_defaults() {
+        // 只写 enabled，metric/model_label 走默认值
+        let s: crate::devices::ModelInfoSpec = serde_yaml_ng::from_str("enabled: false\n").unwrap();
+        assert!(!s.enabled);
+        assert_eq!(s.metric, "inference_model_info");
+        assert_eq!(s.model_label, "inference_model");
     }
 }

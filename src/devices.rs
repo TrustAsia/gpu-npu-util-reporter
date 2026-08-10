@@ -298,6 +298,37 @@ pub fn ascend_910b_spec() -> DeviceSpec {
     }
 }
 
+/// 模型名称采集配置（数据源级，可选）。
+///
+/// 查询 `inference_model_info` 类指标（值为 1 的 gauge，标签携带 pod 的
+/// 推理模型名），构建 (namespace, pod) → 模型名映射，供「模型名称」列填充。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInfoSpec {
+    /// 是否启用模型信息采集（默认 true）。false 仅跳过指标查询，
+    /// 报表列仍显示从 pod 名推导的名称。
+    #[serde(default = "default_model_info_enabled")]
+    pub enabled: bool,
+    /// 模型信息指标名（默认 "inference_model_info"）。
+    #[serde(default = "default_model_metric")]
+    pub metric: String,
+    /// 模型名所在标签名（默认 "inference_model"）。
+    #[serde(default = "default_model_label")]
+    pub model_label: String,
+}
+
+fn default_model_info_enabled() -> bool {
+    true
+}
+
+fn default_model_metric() -> String {
+    "inference_model_info".into()
+}
+
+fn default_model_label() -> String {
+    "inference_model".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

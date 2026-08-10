@@ -845,6 +845,7 @@ mod tests {
             namespace: String::new(),
             pod: String::new(),
             container: String::new(),
+            inference_model: String::new(),
             core_avg: None,
             core_peak: None,
             core_peak_time: None,
@@ -1297,6 +1298,7 @@ mod tests {
             url: "http://x".into(),
             timeout_secs: 30,
             device_types: vec!["dev_a".into(), "dev_b".into()],
+            model_info: None,
         }];
         let mut devices = std::collections::HashMap::new();
         devices.insert("dev_a".into(), crate::devices::DeviceSpec {
