@@ -169,6 +169,24 @@ async fn main() -> ExitCode {
             AppError::redact_url(&src.url)
         );
         let fetcher = PrometheusFetcher::new(src.name.clone(), src.url.clone(), src.timeout_secs);
+        // 模型信息映射：每个源查询一次（可选；失败 → Warning + 空映射，全部走推导兜底）
+        let model_map: HashMap<(String, String), Option<String>> =
+            if let Some(mi) = &src.model_info {
+                if mi.enabled {
+                    match pipeline::collect_model_info(&fetcher, mi, start, end, step).await {
+                        Ok(map) => map,
+                        Err(e) => {
+                            warn!("{e}");
+                            warnings.push(format!("{e}"));
+                            HashMap::new()
+                        }
+                    }
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            };
         for dt_key in &src.device_types {
             let spec = if let Some(s) = cfg.devices.get(dt_key) {
                 s.clone()
@@ -179,7 +197,7 @@ async fn main() -> ExitCode {
                 continue;
             };
             info!("  采集设备类型「{}」({})", spec.display_name, dt_key);
-            let outcome =
+            let mut outcome =
                 pipeline::collect_device(&fetcher, &src.name, &spec, start, end, step, &cfg).await;
             for w in &outcome.warnings {
                 warn!("{w}");
@@ -190,6 +208,8 @@ async fn main() -> ExitCode {
                 spec.display_name,
                 outcome.records.len()
             );
+            // 模型名称填充（映射为空时仍调用，走 pod 名推导兜底）
+            pipeline::apply_model_info(&mut outcome.records, &model_map);
             records.extend(outcome.records);
         }
         info!("数据源「{}」采集完成", src.name);
