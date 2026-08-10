@@ -299,6 +299,12 @@ timezone: "Asia/Shanghai"
 #   timeout_secs  — 单次 HTTP 请求超时（秒），默认 30
 #   device_types  — 该源覆盖的设备类型列表，引用下方 devices 块中的 key
 #                   每个 key 会发起独立的 PromQL 查询，互不干扰
+#   model_info    — 模型名称采集配置（可选）。查询模型信息指标构建
+#                   (namespace, pod) → 模型名映射，填入「模型名称」列。
+#                   enabled     — 是否启用（默认 true）。false 仅跳过指标查询，
+#                                 报表列仍显示从 pod 名推导的名称
+#                   metric      — 模型信息指标名（默认 "inference_model_info"）
+#                   model_label — 模型名所在标签名（默认 "inference_model"）
 #
 # 示例：下方配置表示从 prod-cluster 采集 nvidia_a10 和 ascend_910b 两种设备。
 #
@@ -307,6 +313,7 @@ sources:
     url: "http://192.168.1.100:9090"
     timeout_secs: 30
     device_types: ["nvidia_a10", "ascend_910b"]
+    # model_info:                       # 可选；不配 = 跳过指标查询
 
 # =============================================================================
 # 四、设备类型指标配方 — 定义每种设备的 Prometheus 指标和标签映射
