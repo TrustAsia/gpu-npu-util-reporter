@@ -168,7 +168,12 @@ async fn main() -> ExitCode {
             src.name,
             AppError::redact_url(&src.url)
         );
-        let fetcher = PrometheusFetcher::new(src.name.clone(), src.url.clone(), src.timeout_secs);
+        let fetcher = PrometheusFetcher::new(
+            src.name.clone(),
+            src.url.clone(),
+            src.timeout_secs,
+            src.cookies.clone(),
+        );
         // 模型信息映射：每个源查询一次（可选；失败 → Warning + 空映射，全部走推导兜底）
         let model_map: HashMap<(String, String), Option<String>> =
             if let Some(mi) = &src.model_info {

@@ -47,10 +47,19 @@ const MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
 
 impl PrometheusFetcher {
     #[must_use]
-    pub fn new(source_name: String, base_url: String, timeout_secs: u64) -> Self {
+    pub fn new(source_name: String, base_url: String, timeout_secs: u64, cookies: Option<String>) -> Self {
         let redacted_url = crate::error::AppError::redact_url(&base_url);
+        // 可选的 Cookie 头（网关/代理后的 Prometheus 需要会话认证时使用）。
+        // 设为 client 级默认头，对所有请求生效；cookie 值不会出现在错误消息中。
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(c) = cookies {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(&c) {
+                headers.insert(reqwest::header::COOKIE, v);
+            }
+        }
         let client = reqwest::ClientBuilder::new()
             .timeout(std::time::Duration::from_secs(timeout_secs))
+            .default_headers(headers)
             .build();
         let client = match client {
             Ok(c) => c,

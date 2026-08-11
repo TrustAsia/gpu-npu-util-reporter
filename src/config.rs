@@ -45,6 +45,10 @@ pub struct SourceConfig {
     /// 「模型名称」列仍显示从 pod 名推导的名称。
     #[serde(default)]
     pub model_info: Option<crate::devices::ModelInfoSpec>,
+    /// 可选的 Cookie 头（网关/代理后的 Prometheus 需要会话认证时使用，
+    /// 形如 "KuboardToken=xxx; KuboardProxy=yyy"）。不配置则不发送。
+    #[serde(default)]
+    pub cookies: Option<String>,
 }
 
 const fn default_timeout() -> u64 {
@@ -299,6 +303,8 @@ timezone: "Asia/Shanghai"
 #   timeout_secs  — 单次 HTTP 请求超时（秒），默认 30
 #   device_types  — 该源覆盖的设备类型列表，引用下方 devices 块中的 key
 #                   每个 key 会发起独立的 PromQL 查询，互不干扰
+#   cookies       — 可选的 Cookie 头（网关/代理后的 Prometheus 需要会话认证时，
+#                   形如 "KuboardToken=xxx; KuboardProxy=yyy"）。不配置则不发送。
 #   model_info    — 模型名称采集配置（可选）。查询模型信息指标构建
 #                   (namespace, pod) → 模型名映射，填入「模型名称」列。
 #                   enabled     — 是否启用（默认 true）。false 仅跳过指标查询，
@@ -1016,6 +1022,16 @@ fn validate_config(cfg: &AppConfig, path: &str) -> Result<(), AppError> {
                 });
             }
         }
+        // cookies 不能含换行符（HTTP header 注入防护）；值本身可能是敏感 token，
+        // 因此错误消息不回显 cookie 内容。
+        if let Some(c) = &src.cookies {
+            if c.is_empty() || c.contains(['\r', '\n']) {
+                return Err(AppError::Config {
+                    path: path.into(),
+                    reason: "sources[].cookies 不能为空或包含换行符".into(),
+                });
+            }
+        }
         // 校验模型信息配置的指标名/标签名合法性。
         // 仅在校验启用时进行：enabled=false 意味着跳过指标查询，
         // 配置值非法不应阻断整个配置加载（与模板注释「false 仅跳过指标查询」一致）。
@@ -1715,6 +1731,7 @@ mod tests {
             timeout_secs: 30,
             device_types: vec!["nvidia_a10".into()], // 与 source1 重复
             model_info: None,
+            cookies: None,
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_err(), "跨源重复 device_types 应被拒绝");

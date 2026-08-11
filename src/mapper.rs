@@ -1301,6 +1301,7 @@ mod tests {
             timeout_secs: 30,
             device_types: vec!["dev_a".into(), "dev_b".into()],
             model_info: None,
+            cookies: None,
         }];
         let mut devices = std::collections::HashMap::new();
         devices.insert("dev_a".into(), crate::devices::DeviceSpec {
