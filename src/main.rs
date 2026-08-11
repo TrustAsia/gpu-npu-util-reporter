@@ -174,7 +174,23 @@ async fn main() -> ExitCode {
             if let Some(mi) = &src.model_info {
                 if mi.enabled {
                     match pipeline::collect_model_info(&fetcher, mi, start, end, step).await {
-                        Ok(map) => map,
+                        Ok(map) => {
+                            info!(
+                                "数据源「{}」模型映射：查询到 {} 个 pod（指标「{}」，标签「{}」）",
+                                src.name,
+                                map.len(),
+                                mi.metric,
+                                mi.model_label
+                            );
+                            if map.is_empty() {
+                                warn!(
+                                    "数据源「{}」模型映射为空——「模型名称」列将全部走 pod 名推导兜底，\
+                                     请确认该源的 Prometheus 中存在指标「{}」",
+                                    src.name, mi.metric
+                                );
+                            }
+                            map
+                        }
                         Err(e) => {
                             warn!("{e}");
                             warnings.push(format!("{e}"));

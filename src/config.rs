@@ -646,6 +646,7 @@ report:
 # namespace         Namespace
 # pod               Pod
 # container         容器名称
+# inference_model   模型名称（来自 inference_model_info 指标标签或 pod 名推导）
 # range_start       数据开始时间
 # range_end         数据结束时间
 # time_range        取值时间范围
@@ -722,6 +723,12 @@ database:
     - local_name: "container"
       db_name: "container"
       comment: "容器名称"
+    # 「模型名称」列像其他列一样可按需配置（local_name 固定为 inference_model，
+    # db_name/类型/注释/在列表中的位置由你指定；不配置则 DB 表中无此列）：
+    # - local_name: "inference_model"
+    #   db_name: "inference_model"
+    #   db_type: "VARCHAR(128) DEFAULT NULL"
+    #   comment: "模型名称"
     - local_name: "time_range"
       db_name: "time_range"
       db_type: "VARCHAR(64) DEFAULT NULL"
@@ -2177,6 +2184,41 @@ mod tests {
         });
         let r = validate_config(&cfg, "test.yaml");
         assert!(r.is_ok(), "已知基础字段名应通过校验");
+    }
+
+    #[test]
+    fn database_config_accepts_inference_model_mapping() {
+        // 「模型名称」列像其他基础列一样，可在 database.columns 中自由配置
+        // （local_name 为 inference_model，db_name/类型/注释/列表位置由用户指定）。
+        let mut cfg = serde_yaml_ng::from_str::<AppConfig>(&default_config_yaml()).unwrap();
+        cfg.database = Some(DatabaseConfig {
+            enabled: true,
+            host: "localhost".into(),
+            port: 3306,
+            username: "root".into(),
+            password: String::new(),
+            database: "test".into(),
+            table: "util".into(),
+            columns: vec![
+                ColumnMapping {
+                    local_name: "host_ip".into(),
+                    db_name: "host_ip".into(),
+                    db_type: None,
+                    comment: "主机IP".into(),
+                },
+                ColumnMapping {
+                    local_name: "inference_model".into(),
+                    db_name: "inference_model".into(),
+                    db_type: Some("VARCHAR(128) DEFAULT NULL".into()),
+                    comment: "模型名称".into(),
+                },
+            ],
+        });
+        let r = validate_config(&cfg, "test.yaml");
+        assert!(
+            r.is_ok(),
+            "inference_model 应像其他基础列一样可通过 database.columns 配置"
+        );
     }
 
     #[test]
